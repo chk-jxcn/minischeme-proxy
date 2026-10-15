@@ -20,7 +20,7 @@ from .crypto import (
     HAS_CRYPTOGRAPHY
 )
 from .database import Database
-from .endpoints import get_weather, get_stocks, get_crypto, get_news
+from .endpoints import get_weather, get_stocks, get_crypto, get_news, get_futures
 from .user_portal import USER_HTML, generate_user_nonce, verify_user_login, check_user_session
 from .admin_portal import ADMIN_HTML, create_admin_session, verify_admin_session
 
@@ -111,19 +111,29 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             items = self.server_ctx.db.get_app_data(mac, masked=False)  # Admin gets plaintext
             return self._send_json({"success": True, "items": items})
 
-        # Plain app endpoints (for LAN / unencrypted fallback)
+        # Plain app endpoints (dedicated per-app interfaces)
         if path == "/app/weather":
             loc = qs.get("loc", ["auto"])[0]
-            return self._send_json(get_weather(loc))
+            key = qs.get("key", [""])[0]
+            host = qs.get("host", [""])[0]
+            return self._send_json(get_weather(loc, key, host))
         if path == "/app/stocks":
-            codes = qs.get("codes", ["sh000001"])[0]
-            return self._send_json(get_stocks(codes))
+            view = qs.get("view", ["all"])[0]
+            codes = qs.get("codes", ["sh600519,sz300750,sz000858"])[0]
+            index = qs.get("index", ["sh000001"])[0]
+            return self._send_json(get_stocks(view, codes, index))
         if path == "/app/crypto":
-            symbols = qs.get("symbols", ["BTC"])[0]
-            return self._send_json(get_crypto(symbols))
+            view = qs.get("view", ["all"])[0]
+            symbols = qs.get("symbols", ["BTC,ETH,SOL"])[0]
+            return self._send_json(get_crypto(view, symbols))
+        if path == "/app/futures":
+            view = qs.get("view", ["all"])[0]
+            codes = qs.get("codes", ["RB0,AU0,CU0"])[0]
+            return self._send_json(get_futures(view, codes))
         if path == "/app/news":
-            cat = qs.get("cat", ["realtime"])[0]
-            return self._send_json(get_news(cat))
+            cat = qs.get("cat", ["all"])[0]
+            n = int(qs.get("n", ["8"])[0])
+            return self._send_json(get_news(cat, n))
 
         if path == "/app/ping":
             return self._send_json({"items": [{"t": "ok", "time": int(time.time())}]})
@@ -207,7 +217,83 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 "time": int(time.time())
             })
 
-        # 3. Step 3 & 5: Encrypted Channel (Binary MSC1 + Batch payload)
+        # Unified Minimal-RTT Authentication (/channel/auth)
+        if path == "/channel/auth":
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                mac = payload["mac"].replace(":", "").replace("-", "").upper()
+            except Exception as e:
+                return self._send_json({"success": False, "error": f"invalid payload: {e}"}, 400)
+
+            # A. Challenge-response verification (factory reset recovery)
+            if "response" in payload:
+                resp_hex = payload["response"]
+                response = bytes.fromhex(resp_hex)
+                if mac not in self.server_ctx.recovery_challenges:
+                    return self._send_json({"success": False, "error": "challenge expired or not requested"}, 400)
+                ch_nonce, exp = self.server_ctx.recovery_challenges.pop(mac)
+                if exp < time.time():
+                    return self._send_json({"success": False, "error": "challenge expired"}, 400)
+
+                dev = self.server_ctx.db.get_device(mac)
+                if not dev or not verify_challenge_response(dev["hardware_hash_key"], ch_nonce, response):
+                    client_ip = self.client_address[0]
+                    self.server_ctx.db.log_access(mac, client_ip, "POST", "/channel/auth", 403, len(raw_body))
+                    return self._send_json({"success": False, "error": "verification failed"}, 403)
+
+                m2 = dev["master_key_2"]
+                client_ip = self.client_address[0]
+                self.server_ctx.db.update_device_seen(mac, client_ip)
+                self.server_ctx.db.log_access(mac, client_ip, "POST", "/channel/auth", 200, len(raw_body))
+                return self._send_json({
+                    "success": True,
+                    "status": "recovered",
+                    "master_key_2": m2.hex(),
+                    "time": int(time.time())
+                })
+
+            # B. Initial Registration / Connection check
+            if "hardware_hash_key" in payload:
+                hw_hash_hex = payload["hardware_hash_key"]
+                hw_hash_key = bytes.fromhex(hw_hash_hex)
+                dev = self.server_ctx.db.get_device(mac)
+                if dev:
+                    # Device already has data on server: trigger challenge-response (Step 4)
+                    ch_nonce = secrets.token_bytes(32)
+                    self.server_ctx.recovery_challenges[mac] = (ch_nonce, time.time() + 60)
+                    return self._send_json({
+                        "success": True,
+                        "status": "challenge_required",
+                        "challenge": ch_nonce.hex(),
+                        "time": int(time.time())
+                    })
+                else:
+                    # Brand new device: derive master_key_2 and register (Step 2 - 1 RTT)
+                    m2 = derive_master_key_2(self.server_ctx.master_key_1, hw_hash_key, mac)
+                    client_ip = self.client_address[0]
+                    self.server_ctx.db.register_device(mac, hw_hash_key, m2, client_ip)
+                    self.server_ctx.db.log_access(mac, client_ip, "POST", "/channel/auth", 200, len(raw_body))
+                    return self._send_json({
+                        "success": True,
+                        "status": "registered",
+                        "master_key_2": m2.hex(),
+                        "time": int(time.time())
+                    })
+
+            # C. Request challenge explicitly
+            dev = self.server_ctx.db.get_device(mac)
+            if not dev:
+                return self._send_json({"success": False, "error": "unknown device"}, 404)
+            ch_nonce = secrets.token_bytes(32)
+            self.server_ctx.recovery_challenges[mac] = (ch_nonce, time.time() + 60)
+            return self._send_json({
+                "success": True,
+                "status": "challenge",
+                "challenge": ch_nonce.hex(),
+                "time": int(time.time())
+            })
+
+        # 3. Step 3 & 5: Encrypted Channel (Binary MSC1)
         if path == "/channel":
             return self._handle_encrypted_channel(raw_body)
 
@@ -295,24 +381,36 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         url = plaintext[7 + m_len:7 + m_len + u_len].decode("utf-8", "replace")
         body = plaintext[7 + m_len + u_len:]
 
-        # Step 5: Route request or batch query
+        # Step 5: Route request to separate app endpoints
         resp_status = 200
-        if url == "/app/batch":
-            # Multi-in-one query: clock + weather + news
-            res_obj = {
-                "time": now,
-                "weather": get_weather(),
-                "news": get_news(n=4)
-            }
-            resp_body = json.dumps(res_obj).encode("utf-8")
-        elif url.startswith("/app/weather"):
-            resp_body = json.dumps(get_weather()).encode("utf-8")
-        elif url.startswith("/app/stocks"):
-            resp_body = json.dumps(get_stocks()).encode("utf-8")
-        elif url.startswith("/app/crypto"):
-            resp_body = json.dumps(get_crypto()).encode("utf-8")
-        elif url.startswith("/app/news"):
-            resp_body = json.dumps(get_news()).encode("utf-8")
+        parsed_url = urllib.parse.urlparse(url)
+        path = parsed_url.path
+        qs = urllib.parse.parse_qs(parsed_url.query)
+
+        if path == "/app/weather":
+            loc = qs.get("loc", ["auto"])[0]
+            key = qs.get("key", [""])[0]
+            host = qs.get("host", [""])[0]
+            resp_body = json.dumps(get_weather(loc, key, host)).encode("utf-8")
+        elif path == "/app/stocks":
+            view = qs.get("view", ["all"])[0]
+            codes = qs.get("codes", ["sh600519,sz300750,sz000858"])[0]
+            index = qs.get("index", ["sh000001"])[0]
+            resp_body = json.dumps(get_stocks(view, codes, index)).encode("utf-8")
+        elif path == "/app/crypto":
+            view = qs.get("view", ["all"])[0]
+            symbols = qs.get("symbols", ["BTC,ETH,SOL"])[0]
+            resp_body = json.dumps(get_crypto(view, symbols)).encode("utf-8")
+        elif path == "/app/futures":
+            view = qs.get("view", ["all"])[0]
+            codes = qs.get("codes", ["RB0,AU0,CU0"])[0]
+            resp_body = json.dumps(get_futures(view, codes)).encode("utf-8")
+        elif path == "/app/news":
+            cat = qs.get("cat", ["all"])[0]
+            n = int(qs.get("n", ["8"])[0])
+            resp_body = json.dumps(get_news(cat, n)).encode("utf-8")
+        elif path == "/app/ping":
+            resp_body = json.dumps({"items": [{"t": "ok", "time": now}]}).encode("utf-8")
         else:
             resp_body = json.dumps({"items": [{"t": "ok"}]}).encode("utf-8")
 

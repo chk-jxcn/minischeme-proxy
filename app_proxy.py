@@ -69,14 +69,17 @@ def main():
                 cfg.write(f)
             print(f"[*] Admin password saved to {args.config}")
 
+    db_path = cfg.get("server", "db_path", fallback=args.db)
+
     print("=" * 60)
     print(f" MiniScheme App Proxy & Protocol Converter [{args.mode.upper()} MODE]")
     print(f" Listening on http://{args.host}:{args.port}")
+    print(f" SQLite DB:     {os.path.abspath(db_path)}")
     print(f" User Portal:   http://{args.host}:{args.port}/user")
     print(f" Admin Portal:  http://{args.host}:{args.port}/admin")
     print("=" * 60)
 
-    server = ProxyServer((args.host, args.port), master_key_1, admin_password, db_path=args.db)
+    server = ProxyServer((args.host, args.port), master_key_1, admin_password, db_path=db_path)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

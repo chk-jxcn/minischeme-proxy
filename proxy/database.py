@@ -23,21 +23,39 @@ def mask_sensitive_value(key: str, val: str) -> str:
 
 class Database:
     def __init__(self, db_path: str = "minischeme_proxy.db"):
-        self.db_path = db_path
-        self._shared_conn = sqlite3.connect(db_path) if db_path == ":memory:" else None
-        if self._shared_conn:
+        if db_path != ":memory:":
+            self.db_path = os.path.abspath(db_path)
+            parent_dir = os.path.dirname(self.db_path)
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            self._shared_conn = None
+        else:
+            self.db_path = ":memory:"
+            self._shared_conn = sqlite3.connect(":memory:", check_same_thread=False)
             self._shared_conn.row_factory = sqlite3.Row
         self._init_db()
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._shared_conn:
             return self._shared_conn
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         return conn
 
+    def close(self):
+        """Closes shared database connection if opened."""
+        if self._shared_conn:
+            try:
+                self._shared_conn.close()
+            except Exception:
+                pass
+            self._shared_conn = None
+
     def _init_db(self):
         with self._get_conn() as conn:
+            if self.db_path != ":memory:":
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS devices (
                     mac TEXT PRIMARY KEY,

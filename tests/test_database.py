@@ -49,3 +49,30 @@ def test_database_crud():
     assert db.get_device(mac) is None
     assert len(db.get_app_data(mac)) == 0
     assert len(db.get_device_logs(mac)) == 0
+
+
+def test_database_file_persistence(tmp_path):
+    """Verifies that SQLite database is correctly persisted as a disk file."""
+    db_file = str(tmp_path / "sub_dir" / "test_persist.db")
+    db1 = Database(db_file)
+    mac = "AABBCCDDEEFF"
+    hw_hash = b"hw_hash_test_1234567890abcdef12"
+    m2 = b"master_2_test_1234567890abcdef12"
+
+    db1.register_device(mac, hw_hash, m2, "192.168.1.50")
+    db1.set_app_data(mac, "stocks", "codes", "sh600519")
+    db1.close()
+
+    # Re-open database from disk file and verify data survived process termination
+    db2 = Database(db_file)
+    dev = db2.get_device(mac)
+    assert dev is not None
+    assert dev["mac"] == mac
+    assert dev["hardware_hash_key"] == hw_hash
+    assert dev["master_key_2"] == m2
+
+    data = db2.get_app_data(mac, "stocks")
+    assert len(data) == 1
+    assert data[0]["key"] == "codes"
+    assert data[0]["value"] == "sh600519"
+    db2.close()

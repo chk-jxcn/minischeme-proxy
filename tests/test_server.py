@@ -110,3 +110,72 @@ def test_admin_portal_flow(proxy_server):
     d_resp = json.loads(d_req.read().decode())
     assert d_resp["success"] is True
     assert any(d["mac"] == "A1B2C3D4E5F6" for d in d_resp["devices"])
+
+
+def test_unified_auth_flow(proxy_server):
+    """Verifies minimal round-trip unified authentication (/channel/auth)."""
+    base_url, _, _ = proxy_server
+    mac = "B2C3D4E5F6A1"
+    hw_pwd = "device_test_pwd_2"
+    hw_hash = derive_hardware_hash_key(hw_pwd, mac)
+
+    # 1. 1-RTT Registration
+    reg_body = json.dumps({"mac": mac, "hardware_hash_key": hw_hash.hex()}).encode()
+    req = urllib.request.Request(f"{base_url}/channel/auth", data=reg_body, headers={"Content-Type": "application/json"})
+    resp = json.loads(urllib.request.urlopen(req).read().decode())
+    assert resp["success"] is True
+    assert resp["status"] == "registered"
+    assert "master_key_2" in resp
+    assert "time" in resp
+    m2 = resp["master_key_2"]
+
+    # 2. Challenge requested on reconnect/recovery
+    req2 = urllib.request.Request(f"{base_url}/channel/auth", data=reg_body, headers={"Content-Type": "application/json"})
+    resp2 = json.loads(urllib.request.urlopen(req2).read().decode())
+    assert resp2["success"] is True
+    assert resp2["status"] == "challenge_required"
+    assert "challenge" in resp2
+    challenge = bytes.fromhex(resp2["challenge"])
+
+    # 3. 1-Reply Recovery verification
+    sol = create_challenge_response(hw_hash, challenge)
+    verify_body = json.dumps({"mac": mac, "response": sol.hex()}).encode()
+    req3 = urllib.request.Request(f"{base_url}/channel/auth", data=verify_body, headers={"Content-Type": "application/json"})
+    resp3 = json.loads(urllib.request.urlopen(req3).read().decode())
+    assert resp3["success"] is True
+    assert resp3["status"] == "recovered"
+    assert resp3["master_key_2"] == m2
+
+
+def test_per_app_endpoints(proxy_server):
+    """Verifies individual app endpoints and multi-page aggregation."""
+    base_url, _, _ = proxy_server
+
+    # 1. Weather: serves all 5 pages
+    w_req = urllib.request.urlopen(f"{base_url}/app/weather?loc=Beijing")
+    w_data = json.loads(w_req.read().decode())
+    types = {it["t"] for it in w_data["items"]}
+    assert "loc" in types and "now" in types and "day" in types and "hour" in types and "idx" in types
+
+    # 2. News: cat=all returns all categories in one query
+    n_req = urllib.request.urlopen(f"{base_url}/app/news?cat=all&n=5")
+    n_data = json.loads(n_req.read().decode())
+    cats = {it.get("c") for it in n_data["items"] if "c" in it}
+    assert "realtime" in cats and "livelihood" in cats and "finance" in cats
+
+    # 3. Stocks: view=all returns quotes, trends, and klines together
+    s_req = urllib.request.urlopen(f"{base_url}/app/stocks?view=all")
+    s_data = json.loads(s_req.read().decode())
+    s_types = {it["t"] for it in s_data["items"]}
+    assert "quote" in s_types and "trend" in s_types and "kline" in s_types
+
+    # 4. Crypto: view=all
+    c_req = urllib.request.urlopen(f"{base_url}/app/crypto?view=all")
+    c_data = json.loads(c_req.read().decode())
+    assert any(it["t"] == "crypto" or it["t"] == "quote" for it in c_data["items"])
+
+    # 5. Futures: view=all
+    f_req = urllib.request.urlopen(f"{base_url}/app/futures?view=all")
+    f_data = json.loads(f_req.read().decode())
+    assert any(it["t"] == "quote" for it in f_data["items"])
+

@@ -1,0 +1,25 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases and runtime configs
+*.db
+*.sqlite3
+*.log
+config.ini
+
+# Environments
+venv/
+.venv/
+.env
+
+# Editor and temporary files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

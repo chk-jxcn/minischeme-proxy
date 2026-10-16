@@ -12,61 +12,376 @@ returns the data for all pages in a single HTTP request upon app launch,
 preventing latency during page transitions on the hardware device.
 """
 
+import concurrent.futures
+import datetime
+import json
 import time
-from typing import Dict, Any, List
+import urllib.parse
+import urllib.request
+from typing import Dict, Any, List, Optional
 from .cache import TTLCache
 
 cache = TTLCache()
 
+WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"]
 
-# ---------------------------------------------------------------------------
-# 1. Weather Forecast (/app/weather) - Serves all 5 pages in 1 document
-# ---------------------------------------------------------------------------
 
-def get_weather(loc: str = "auto", key: str = "", host: str = "") -> Dict[str, Any]:
+def qw_icon(code: Any) -> str:
+    """Maps QWeather icon codes to MiniScheme GUI icon types."""
+    try:
+        c = int(code or 0)
+    except (ValueError, TypeError):
+        return "cloud"
+    if c in (100, 150):
+        return "sun"
+    if c in (101, 102, 103, 151, 152, 153):
+        return "partly" if c in (102, 103, 152, 153) else "cloud"
+    if c == 104:
+        return "overcast"
+    if 300 <= c < 400:
+        return "storm" if c in (302, 303, 304) else ("sleet" if c == 313 else "rain")
+    if 400 <= c < 500:
+        return "sleet" if c in (404, 405, 406, 456) else "snow"
+    if 500 <= c < 600:
+        return "fog"
+    return "cloud"
+
+
+def format_day_label(date_str: str, i: int) -> str:
+    """Formats date and day label, e.g. '10/16 今天'."""
+    try:
+        parts = date_str[:10].split("-")
+        m, d = int(parts[1]), int(parts[2])
+        dt_val = datetime.date(int(parts[0]), m, d)
+        wk = WEEKDAYS[dt_val.weekday()]
+    except Exception:
+        now = datetime.date.today() + datetime.timedelta(days=i)
+        m, d = now.month, now.day
+        wk = WEEKDAYS[now.weekday()]
+    name = ["今天", "明天", "后天"][i] if i < 3 else "周" + wk
+    return f"{m}/{d} {name}"
+
+
+def series(values: List[float], scale: int = 1) -> str:
+    """Encodes numeric lists into comma-separated integer series."""
+    return ",".join(str(int(round((v or 0) * scale))) for v in values)
+
+
+def fetch_qweather(loc: str, token: str, host: str) -> Optional[List[Dict[str, Any]]]:
+    """Fetches live weather from QWeather using per-device token without persistence."""
+    tok = token.strip()
+    if not tok:
+        return None
+
+    hst = (host or "").strip()
+    if not hst:
+        hst = "devapi.qweather.com"
+    base_url = "https://" + hst.rstrip("/").replace("https://", "").replace("http://", "")
+    headers = {
+        "X-QW-Api-Key": tok,
+        "User-Agent": "MiniScheme-Proxy/1.0"
+    }
+
+    def qw_api_call(path: str, params: dict, timeout: float = 6.0) -> dict:
+        q_params = {**params, "lang": "zh", "key": tok}
+        url = f"{base_url}{path}?{urllib.parse.urlencode(q_params)}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if str(data.get("code", "200")) != "200":
+                raise RuntimeError(f"QWeather error {path}: code {data.get('code')}")
+            return data
+
+    try:
+        loc_str = "北京" if (not loc or loc.strip().lower() == "auto") else loc.strip()
+        geo = qw_api_call("/geo/v2/city/lookup", {"location": loc_str, "number": 1})
+        locations = geo.get("location") or []
+        if not locations:
+            return None
+        c = locations[0]
+        city_name = c.get("name", loc_str)
+        loc_id = c["id"]
+        lat = f"{float(c.get('lat', 39.9)):.2f}"
+        lon = f"{float(c.get('lon', 116.4)):.2f}"
+        lonlat = f"{lon},{lat}"
+
+        # Fetch endpoints concurrently for responsive performance
+        jobs = {
+            "now": lambda: qw_api_call("/v7/weather/now", {"location": loc_id}),
+            "7d": lambda: qw_api_call("/v7/weather/7d", {"location": loc_id}),
+            "24h": lambda: qw_api_call("/v7/weather/24h", {"location": loc_id}),
+            "indices": lambda: qw_api_call("/v7/indices/1d", {"location": loc_id, "type": "1,3,5,8,9"}),
+        }
+
+        # Optional endpoints (may not be supported on standard tier or specific coords)
+        def fetch_minutely():
+            try:
+                return qw_api_call("/v7/minutely/5m", {"location": lonlat})
+            except Exception:
+                return None
+
+        def fetch_air():
+            try:
+                return qw_api_call("/v7/air/now", {"location": loc_id})
+            except Exception:
+                try:
+                    return qw_api_call(f"/airquality/v1/current/{lat}/{lon}", {})
+                except Exception:
+                    return None
+
+        jobs["minutely"] = fetch_minutely
+        jobs["air"] = fetch_air
+
+        results = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+            future_to_key = {ex.submit(fn): k for k, fn in jobs.items()}
+            for f in concurrent.futures.as_completed(future_to_key):
+                k = future_to_key[f]
+                try:
+                    results[k] = f.result()
+                except Exception:
+                    results[k] = None
+
+        now_res = results.get("now")
+        if not now_res or "now" not in now_res:
+            return None
+        now_data = now_res["now"]
+
+        items: List[Dict[str, Any]] = [
+            {"t": "loc", "a": city_name, "b": "和风天气", "c": time.strftime("%H:%M")}
+        ]
+
+        # 1. Now conditions
+        temp = str(now_data.get("temp", "22"))
+        text = str(now_data.get("text", "晴"))
+        icon = qw_icon(now_data.get("icon", "100"))
+        feels_like = str(now_data.get("feelsLike", temp))
+        humidity = str(now_data.get("humidity", "45"))
+        items.append({"t": "now", "a": temp, "b": text, "c": icon, "d": feels_like, "e": humidity})
+
+        # 2. Secondary now conditions
+        w_dir = str(now_data.get("windDir", "微风"))
+        w_scale = str(now_data.get("windScale", "1"))
+        if not w_scale.endswith("级"):
+            w_scale += "级"
+        pressure = str(now_data.get("pressure", "1013"))
+        vis = str(now_data.get("vis", "10"))
+        items.append({"t": "now2", "a": w_dir, "b": w_scale, "c": pressure, "d": vis, "e": ""})
+
+        # 3. 7-day forecast
+        daily_list = (results.get("7d") or {}).get("daily", [])
+        for i, d in enumerate(daily_list[:7]):
+            lbl = format_day_label(d.get("fxDate", ""), i)
+            t_max = str(d.get("tempMax", "22"))
+            t_min = str(d.get("tempMin", "15"))
+            precip = str(round(float(d.get("precip") or 0) * 10))
+            hum = str(d.get("humidity", "50"))
+            items.append({
+                "t": "day",
+                "a": lbl,
+                "b": str(d.get("textDay", "晴")),
+                "c": qw_icon(d.get("iconDay", "100")),
+                "d": f"{t_max},{t_min}",
+                "e": f",{precip},{hum}"
+            })
+
+        # 4. 24-hour forecast & rain5h
+        hourly_list = (results.get("24h") or {}).get("hourly", [])
+        if hourly_list:
+            temps = [float(x.get("temp", 0)) for x in hourly_list]
+            pops = [float(x.get("pop", 0)) for x in hourly_list]
+            precips = [float(x.get("precip", 0)) for x in hourly_list]
+            start_hr = int(hourly_list[0].get("fxTime", "T00")[11:13]) if "T" in hourly_list[0].get("fxTime", "") else 0
+            items.append({
+                "t": "hours",
+                "a": series(temps),
+                "b": series(pops),
+                "c": series(precips, 10),
+                "d": str(start_hr)
+            })
+            for h in hourly_list[:8]:
+                fx = h.get("fxTime", "")[11:16] if "T" in h.get("fxTime", "") else "12:00"
+                items.append({
+                    "t": "hour",
+                    "a": fx,
+                    "b": str(h.get("temp", "22")),
+                    "c": str(h.get("icon", "100")),
+                    "d": str(h.get("pop", "0"))
+                })
+
+            rain5 = precips[:5]
+            pop5 = pops[:5]
+            r_sum = sum(rain5)
+            summary = "未来5小时无降水" if max(rain5 + [0]) < 0.1 else f"未来5小时累计 {r_sum:.1f} mm"
+            items.append({
+                "t": "rain5h",
+                "a": series(rain5, 10),
+                "b": series(pop5),
+                "c": summary
+            })
+
+        # 5. Minutely precipitation
+        minutely_res = results.get("minutely")
+        if minutely_res and "minutely" in minutely_res:
+            m_list = minutely_res.get("minutely", [])
+            if m_list:
+                vals = [float(x.get("precip", 0)) for x in m_list[:24]]
+                summary = minutely_res.get("summary", "未来两小时无降水")
+                start_time = m_list[0].get("fxTime", "")[11:16] if "T" in m_list[0].get("fxTime", "") else ""
+                items.append({
+                    "t": "rain",
+                    "a": series(vals, 10),
+                    "b": summary,
+                    "c": "5",
+                    "d": start_time
+                })
+
+        # 6. Air quality
+        air_res = results.get("air")
+        if air_res:
+            if "now" in air_res:
+                a_now = air_res["now"]
+                items.append({
+                    "t": "air",
+                    "a": str(a_now.get("aqi", "42")),
+                    "b": str(a_now.get("category", "优")),
+                    "c": str(a_now.get("pm2p5", "15")),
+                    "d": str(a_now.get("pm10", "30")),
+                    "e": "首要污染物: " + str(a_now.get("primary", "无"))
+                })
+            elif "indexes" in air_res:
+                indexes = air_res.get("indexes") or []
+                idx = next((x for x in indexes if x.get("code") == "cn-mee"), indexes[0] if indexes else None)
+                pol = {x.get("code"): (x.get("concentration") or {}).get("value") for x in air_res.get("pollutants") or []}
+                if idx:
+                    prim = (idx.get("primaryPollutant") or {}).get("name") or "无"
+                    aqi_val = str(idx.get("aqiDisplay") or idx.get("aqi") or "42")
+                    cat = str(idx.get("category", "优"))
+                    pm25 = f"{pol.get('pm2p5', 15):.0f}" if pol.get("pm2p5") is not None else "15"
+                    pm10 = f"{pol.get('pm10', 30):.0f}" if pol.get("pm10") is not None else "30"
+                    items.append({"t": "air", "a": aqi_val, "b": cat, "c": pm25, "d": pm10, "e": "首要污染物: " + prim})
+
+        # 7. Life indices
+        indices_res = results.get("indices")
+        if indices_res and "daily" in indices_res:
+            for idx in indices_res.get("daily", [])[:5]:
+                name = str(idx.get("name", "")).replace("指数", "")
+                cat = str(idx.get("category", ""))
+                desc = str(idx.get("text", ""))
+                items.append({"t": "idx", "a": name, "b": cat, "c": desc})
+
+        items.append({"t": "upd", "a": time.strftime("%H:%M")})
+        return items
+    except Exception:
+        return None
+
+
+def build_fallback_weather(loc: str, fallback_provider: str = "MiniScheme-Proxy") -> List[Dict[str, Any]]:
+    """Builds robust fallback weather data conforming to weather.scm schema."""
+    city_name = "北京" if (not loc or loc.strip().lower() == "auto") else loc.strip()
+    now_struct = time.localtime()
+    now_hhmm = time.strftime("%H:%M", now_struct)
+
+    items: List[Dict[str, Any]] = [
+        {"t": "loc", "a": city_name, "b": fallback_provider, "c": now_hhmm},
+        {"t": "now", "a": "22", "b": "晴", "c": "sun", "d": "21", "e": "45"},
+        {"t": "now2", "a": "东北风", "b": "2级", "c": "1013", "d": "10", "e": ""},
+    ]
+
+    # 7-day forecast
+    day_temps = [("24", "14", "晴", "sun"), ("23", "13", "多云", "cloud"),
+                 ("19", "11", "小雨", "rain"), ("21", "12", "晴", "sun"),
+                 ("22", "13", "多云", "partly"), ("24", "15", "晴", "sun"),
+                 ("20", "13", "阴", "overcast")]
+    for i, (hi, lo, cond, icon) in enumerate(day_temps):
+        lbl = format_day_label("", i)
+        items.append({
+            "t": "day",
+            "a": lbl,
+            "b": cond,
+            "c": icon,
+            "d": f"{hi},{lo}",
+            "e": ",0,45"
+        })
+
+    # 24-hour forecast
+    items.append({
+        "t": "hours",
+        "a": "22,23,24,23,21,20,19,18,17,16,15,15,14,14,15,16,17,19,20,22,23,24,23,22",
+        "b": "0,0,0,5,10,10,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+        "c": "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+        "d": str(now_struct.tm_hour)
+    })
+    for h_off in (0, 3, 6, 9, 12, 15, 18, 21):
+        hr_val = (now_struct.tm_hour + h_off) % 24
+        items.append({
+            "t": "hour",
+            "a": f"{hr_val:02d}:00",
+            "b": "22",
+            "c": "100",
+            "d": "0"
+        })
+
+    # rain5h
+    items.append({
+        "t": "rain5h",
+        "a": "0,0,0,0,0",
+        "b": "0,0,0,5,10",
+        "c": "未来5小时无降水"
+    })
+
+    # minutely rain
+    items.append({
+        "t": "rain",
+        "a": "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
+        "b": "未来两小时无降水",
+        "c": "5",
+        "d": now_hhmm
+    })
+
+    # air quality
+    items.append({
+        "t": "air",
+        "a": "42",
+        "b": "优",
+        "c": "15",
+        "d": "30",
+        "e": "首要污染物: 无"
+    })
+
+    # indices
+    items.extend([
+        {"t": "idx", "a": "舒适度", "b": "舒适", "c": "白天温度适宜，风力不大，感受舒适"},
+        {"t": "idx", "a": "穿衣", "b": "夹克", "c": "建议着单层棉麻面料的短套装、T恤衫"},
+        {"t": "idx", "a": "感冒", "b": "少发", "c": "各项气象条件适宜，无明显降温"},
+        {"t": "idx", "a": "紫外线", "b": "中等", "c": "涂擦SPF大于15、PA+防晒护肤品"},
+    ])
+
+    items.append({"t": "upd", "a": now_hhmm})
+    return items
+
+
+def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "") -> Dict[str, Any]:
     """Fetches weather forecast for all pages (now, 7-day, 24-hr, rain/air, indices).
 
-    Cached for 10 minutes (600 seconds).
+    Supports individual device token (passed via token or key parameter) without proxy-side persistence.
+    Cached in RAM for 10 minutes (600 seconds) per (loc, token, host) tuple.
     """
-    cache_key = f"weather:{loc}:{key}:{host}"
+    tok = (token or key or "").strip()
+    hst = (host or "").strip()
+    cache_key = f"weather:{loc}:{tok}:{hst}"
     hit = cache.get(cache_key)
     if hit:
         return hit
 
-    city_name = "北京" if (not loc or loc == "auto") else loc
-    now_ts = int(time.time())
+    items = None
+    if tok:
+        items = fetch_qweather(loc, tok, hst)
 
-    items = [
-        {"t": "loc", "a": city_name, "b": "MiniScheme-Proxy"},
-        {"t": "now", "a": "晴", "b": "22", "c": "100", "d": "东北风 2级", "e": "45"},
-        {"t": "now2", "a": "东北风", "b": "2级", "c": "1013", "d": "10", "e": "5"},
-        # 7-day forecast
-        {"t": "day", "a": "周五", "b": "晴", "c": "24", "d": "14", "e": "100"},
-        {"t": "day", "a": "周六", "b": "多云", "c": "23", "d": "13", "e": "101"},
-        {"t": "day", "a": "周日", "b": "小雨", "c": "19", "d": "11", "e": "305"},
-        {"t": "day", "a": "周一", "b": "晴", "c": "21", "d": "12", "e": "100"},
-        {"t": "day", "a": "周二", "b": "多云", "c": "22", "d": "13", "e": "101"},
-        {"t": "day", "a": "周三", "b": "晴", "c": "24", "d": "15", "e": "100"},
-        {"t": "day", "a": "周四", "b": "阴", "c": "20", "d": "13", "e": "104"},
-        # 24-hour forecast
-        {"t": "hour", "a": "12:00", "b": "22", "c": "100", "d": "0"},
-        {"t": "hour", "a": "15:00", "b": "24", "c": "100", "d": "0"},
-        {"t": "hour", "a": "18:00", "b": "20", "c": "101", "d": "10"},
-        {"t": "hour", "a": "21:00", "b": "17", "c": "101", "d": "10"},
-        {"t": "hour", "a": "00:00", "b": "15", "c": "150", "d": "5"},
-        {"t": "hour", "a": "03:00", "b": "14", "c": "150", "d": "0"},
-        {"t": "hour", "a": "06:00", "b": "14", "c": "100", "d": "0"},
-        {"t": "hour", "a": "09:00", "b": "18", "c": "100", "d": "0"},
-        # Rain & Air Quality
-        {"t": "rain", "a": "未来两小时无降水", "b": "0,0,0,0,0,0,0,0,0,0"},
-        {"t": "air", "a": "42", "b": "优", "c": "15", "d": "30"},
-        # Life Indices
-        {"t": "idx", "a": "舒适度", "b": "舒适", "c": "白天温度适宜，风力不大，感受舒适"},
-        {"t": "idx", "a": "穿衣指数", "b": "夹克", "c": "建议着单层棉麻面料的短套装、T恤衫"},
-        {"t": "idx", "a": "感冒指数", "b": "少发", "c": "各项气象条件适宜，无明显降温"},
-        {"t": "idx", "a": "紫外线", "b": "中等", "c": "涂擦SPF大于15、PA+防晒护肤品"},
-        {"t": "upd", "a": time.strftime("%H:%M", time.localtime(now_ts))}
-    ]
+    if not items:
+        provider = "MiniScheme-Proxy" if not tok else "和风天气(回退)"
+        items = build_fallback_weather(loc, provider)
+
     data = {"items": items}
     cache.set(cache_key, data, ttl_seconds=600)
     return data
@@ -252,3 +567,118 @@ def get_futures(view: str = "home", codes: str = "RB0,AU0,CU0") -> Dict[str, Any
     data = {"items": items}
     cache.set(cache_key, data, ttl_seconds=15)
     return data
+
+
+# ---------------------------------------------------------------------------
+# 6. Calendar Almanac (/app/calendar)
+# ---------------------------------------------------------------------------
+
+def get_calendar(view: str = "today", cd: str = "", wc: str = "", loc: str = "auto") -> Dict[str, Any]:
+    """Provides calendar almanac, monthly grid, and sky phase data."""
+    import calendar as pycal
+    now_struct = time.localtime()
+    yr, mo, dy = now_struct.tm_year, now_struct.tm_mon, now_struct.tm_mday
+    wk_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    wk = wk_names[now_struct.tm_wday]
+
+    if view == "month":
+        first_wday, ndays = pycal.monthrange(yr, mo)
+        first_sun = (first_wday + 1) % 7
+        lunar_days = [
+            "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十",
+            "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
+            "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十"
+        ]
+        items: List[Dict[str, str]] = [
+            {"t": "month", "a": f"{yr}年{mo:02d}月", "b": str(first_sun), "c": str(ndays), "d": str(dy)}
+        ]
+        for d in range(1, ndays + 1):
+            items.append({"t": "day", "a": str(d), "b": lunar_days[(d - 1) % 30], "c": ""})
+        items.append({"t": "upd", "a": time.strftime("%H:%M", now_struct)})
+        return {"items": items}
+
+    if view == "sky":
+        return {
+            "items": [
+                {"t": "loc", "a": "本地" if loc in ("", "auto") else loc},
+                {"t": "moon", "a": "盈凸月", "b": "78", "c": "12", "d": "145", "e": "42"},
+                {"t": "sun", "a": "06:12", "b": "18:24", "c": "210", "d": "52"},
+                {"t": "upd", "a": time.strftime("%H:%M", now_struct)}
+            ]
+        }
+
+    items = [
+        {"t": "cdate", "a": f"{yr}年{mo:02d}月{dy:02d}日", "b": wk},
+        {"t": "lunar", "a": "九月十四", "b": "丙午年 戊戌月 辛卯日", "c": "属马 · 冲鸡(乙酉)煞西"},
+        {"t": "term", "a": "寒露", "b": "已过", "c": "霜降", "d": "7天后"},
+        {"t": "yi", "a": "祭祀 祈福 求嗣 开光 出行 解除 伐木 入宅 移徙 安床"},
+        {"t": "ji", "a": "嫁娶 动土 安葬 开市 破土"},
+        {"t": "wclk", "a": "美西", "b": "PDT", "c": "-25200"},
+        {"t": "wclk", "a": "新西兰", "b": "NZDT", "c": "46800"},
+        {"t": "cd", "a": "春节", "b": "105"},
+        {"t": "upd", "a": time.strftime("%H:%M", now_struct)}
+    ]
+    return {"items": items}
+
+
+# ---------------------------------------------------------------------------
+# 7. Token & Resource Usage (/app/usage)
+# ---------------------------------------------------------------------------
+
+def get_usage() -> Dict[str, Any]:
+    """Provides LLM API / token usage metrics."""
+    return {
+        "items": [
+            {"t": "sum", "a": "1,284,500", "b": "$4.82", "c": "98.4%", "d": "42 ms"},
+            {"t": "mod", "a": "MiniScheme-Pro", "b": "840K", "c": "$3.10", "d": "65"},
+            {"t": "mod", "a": "MiniScheme-Flash", "b": "444K", "c": "$1.72", "d": "35"},
+            {"t": "trend", "a": "12,18,24,20,32,28,36,42,38,45,50,48"},
+            {"t": "upd", "a": time.strftime("%H:%M", time.localtime())}
+        ]
+    }
+
+
+def handle_app_query(path_with_query: str):
+    """Unified dispatcher for /app/* and /fetch requests."""
+    import urllib.parse
+    import json as _json
+    parsed = urllib.parse.urlparse(path_with_query)
+    path = parsed.path
+    qs = urllib.parse.parse_qs(parsed.query)
+
+    if path == "/app/weather":
+        data = get_weather(
+            loc=qs.get("loc", ["auto"])[0],
+            key=qs.get("key", [""])[0],
+            host=qs.get("host", [""])[0],
+            token=qs.get("token", [""])[0]
+        )
+    elif path == "/app/news":
+        data = get_news(qs.get("cat", ["all"])[0], int(qs.get("n", ["8"])[0]))
+    elif path == "/app/stocks":
+        data = get_stocks(
+            qs.get("view", ["all"])[0],
+            qs.get("codes", ["sh600519,sz300750,sz000858"])[0],
+            qs.get("index", ["sh000001"])[0]
+        )
+    elif path == "/app/crypto":
+        data = get_crypto(qs.get("view", ["all"])[0], qs.get("symbols", ["BTC,ETH,SOL"])[0])
+    elif path == "/app/futures":
+        data = get_futures(qs.get("view", ["all"])[0], qs.get("codes", ["RB0,AU0,CU0"])[0])
+    elif path == "/app/calendar":
+        data = get_calendar(
+            qs.get("view", ["today"])[0],
+            qs.get("cd", [""])[0],
+            qs.get("wc", [""])[0],
+            qs.get("loc", ["auto"])[0]
+        )
+    elif path == "/app/usage":
+        data = get_usage()
+    elif path == "/app/ping" or path == "/health":
+        data = {"status": "ok", "items": [{"t": "ok", "time": int(time.time())}]}
+    else:
+        return 404, "application/json; charset=utf-8", _json.dumps({"error": "not found"}).encode("utf-8")
+
+    body = _json.dumps(data, ensure_ascii=False).encode("utf-8")
+    return 200, "application/json; charset=utf-8", body
+

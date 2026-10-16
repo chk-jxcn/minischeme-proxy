@@ -179,3 +179,34 @@ def test_per_app_endpoints(proxy_server):
     f_data = json.loads(f_req.read().decode())
     assert any(it["t"] == "quote" for it in f_data["items"])
 
+
+def test_weather_with_token_and_non_persistence(proxy_server):
+    """Verifies that weather token parameter is accepted, works without crash, and is never persisted."""
+    base_url, _, db_path = proxy_server
+
+    test_token = "hardware_token_xyz_9988"
+    w_req = urllib.request.urlopen(f"{base_url}/app/weather?loc=Shenzhen&token={test_token}")
+    assert w_req.status == 200
+    w_data = json.loads(w_req.read().decode())
+    types = {it["t"] for it in w_data["items"]}
+    assert "loc" in types and "now" in types and "hours" in types
+
+    # Test key alias compatibility
+    w_req2 = urllib.request.urlopen(f"{base_url}/app/weather?loc=Shenzhen&key={test_token}")
+    assert w_req2.status == 200
+
+    # Ensure token was never saved to sqlite database
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    tables = [row[0] for row in cur.fetchall()]
+    for tbl in tables:
+        cur.execute(f"SELECT * FROM {tbl}")
+        rows = cur.fetchall()
+        for r in rows:
+            for col in r:
+                assert test_token not in str(col), f"Token leaked into database table {tbl}: {col}"
+    conn.close()
+
+

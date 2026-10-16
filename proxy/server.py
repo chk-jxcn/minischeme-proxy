@@ -114,9 +114,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Plain app endpoints (dedicated per-app interfaces)
         if path == "/app/weather":
             loc = qs.get("loc", ["auto"])[0]
+            token = qs.get("token", [""])[0]
             key = qs.get("key", [""])[0]
             host = qs.get("host", [""])[0]
-            return self._send_json(get_weather(loc, key, host))
+            return self._send_json(get_weather(loc, key, host, token))
         if path == "/app/stocks":
             view = qs.get("view", ["all"])[0]
             codes = qs.get("codes", ["sh600519,sz300750,sz000858"])[0]
@@ -389,9 +390,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/app/weather":
             loc = qs.get("loc", ["auto"])[0]
+            token = qs.get("token", [""])[0]
             key = qs.get("key", [""])[0]
             host = qs.get("host", [""])[0]
-            resp_body = json.dumps(get_weather(loc, key, host)).encode("utf-8")
+            resp_body = json.dumps(get_weather(loc, key, host, token)).encode("utf-8")
         elif path == "/app/stocks":
             view = qs.get("view", ["all"])[0]
             codes = qs.get("codes", ["sh600519,sz300750,sz000858"])[0]

@@ -15,6 +15,7 @@ preventing latency during page transitions on the hardware device.
 import concurrent.futures
 import datetime
 import json
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -478,8 +479,202 @@ def get_news(category: str = "realtime", n: int = 8) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Market Helpers & Formatters
+# ---------------------------------------------------------------------------
+
+def _safe_float(val: Any) -> float:
+    try:
+        return float(val or 0.0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _fmt_price(v: float) -> str:
+    """Formats market prices concisely with adaptive decimal precision."""
+    if v >= 10000:
+        return f"{v:.0f}"
+    if v >= 1000:
+        return f"{v:.1f}".rstrip("0").rstrip(".")
+    if v >= 1:
+        return f"{v:.2f}".rstrip("0").rstrip(".") if f"{v:.2f}".endswith(".00") else f"{v:.2f}"
+    if v >= 0.01:
+        return f"{v:.4f}".rstrip("0").rstrip(".")
+    return f"{v:.6f}".rstrip("0").rstrip(".")
+
+
+def _fmt_vol(v: float) -> str:
+    """Formats trading volumes (e.g. 1.2亿, 4500万)."""
+    if v >= 1e8:
+        return f"{v / 1e8:.1f}亿"
+    if v >= 1e4:
+        return f"{v / 1e4:.0f}万"
+    return str(int(v))
+
+
+def market_open() -> bool:
+    """Returns True if Chinese stock market is currently in trading hours."""
+    now = datetime.datetime.now()
+    if now.weekday() >= 5:
+        return False
+    t = now.hour * 60 + now.minute
+    return (9 * 60 + 15 <= t <= 11 * 60 + 35) or (12 * 60 + 55 <= t <= 15 * 60 + 5)
+
+
+def futures_open() -> bool:
+    """Returns True if Chinese futures market is in day or night session."""
+    now = datetime.datetime.now()
+    t = now.hour * 60 + now.minute
+    if t >= 21 * 60:
+        return now.weekday() < 5
+    if t <= 2 * 60 + 30:
+        return 1 <= now.weekday() <= 5
+    return now.weekday() < 5 and 9 * 60 <= t <= 15 * 60 + 15
+
+
+# ---------------------------------------------------------------------------
 # 3. Stock Market (/app/stocks) - Supports view=all for all 4 pages
 # ---------------------------------------------------------------------------
+
+INDICES = ["sh000001", "sz399001", "sz399006", "sh000300"]
+
+STOCK_FALLBACK_DATA = {
+    "sh000001": {"name": "上证指数", "price": 3716.28, "pct": 0.24, "chg": 8.80, "high": 3750.77, "low": 3681.28, "prev": 3707.48},
+    "sz399001": {"name": "深证成指", "price": 11820.50, "pct": 0.82, "chg": 96.10, "high": 11850.00, "low": 11730.00, "prev": 11724.40},
+    "sz399006": {"name": "创业板指", "price": 2495.30, "pct": 1.15, "chg": 28.30, "high": 2510.00, "low": 2465.00, "prev": 2467.00},
+    "sh000300": {"name": "沪深300", "price": 4280.20, "pct": 0.65, "chg": 27.60, "high": 4295.00, "low": 4250.00, "prev": 4252.60},
+    "sh600519": {"name": "贵州茅台", "price": 1580.00, "pct": 0.65, "chg": 10.20, "high": 1590.00, "low": 1570.00, "prev": 1569.80},
+    "sz300750": {"name": "宁德时代", "price": 245.50, "pct": 2.35, "chg": 5.65, "high": 248.00, "low": 240.00, "prev": 239.85},
+    "sz000858": {"name": "五 粮 液", "price": 142.20, "pct": 0.45, "chg": 0.64, "high": 143.50, "low": 141.50, "prev": 141.56},
+}
+
+
+def stock_clean_code(c: str) -> str:
+    c = c.strip().lower()
+    if c.startswith(("sh", "sz", "bj")):
+        return c
+    if c[:1] in ("5", "6", "9"):
+        return "sh" + c
+    if c[:1] in ("4", "8"):
+        return "bj" + c
+    return "sz" + c
+
+
+def fetch_live_stock_quotes(codes_list: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not codes_list:
+        return {}
+    url = "https://qt.gtimg.cn/q=" + ",".join(codes_list)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"})
+    with urllib.request.urlopen(req, timeout=3.5) as resp:
+        text = resp.read().decode("gbk", "replace")
+    results = {}
+    for m in re.finditer(r'v_(\w+)="([^"]*)"', text):
+        s = m.group(1).lower()
+        f = m.group(2).split('~')
+        if len(f) > 34:
+            name = f[1]
+            price = _safe_float(f[3])
+            prev_close = _safe_float(f[4])
+            chg = _safe_float(f[31])
+            pct = _safe_float(f[32])
+            high = _safe_float(f[33])
+            low = _safe_float(f[34])
+            if price > 0:
+                results[s] = {
+                    "name": name,
+                    "price": price,
+                    "prev": prev_close or price,
+                    "chg": chg,
+                    "pct": pct,
+                    "high": high or price,
+                    "low": low or price,
+                    "code": s
+                }
+    return results
+
+
+def make_stock_item(tag: str, code: str, info: Dict[str, Any]) -> Dict[str, str]:
+    name = info.get("name", code)
+    price = info.get("price", 100.0)
+    pct = info.get("pct", 0.0)
+    chg = info.get("chg", 0.0)
+    high = info.get("high", price)
+    low = info.get("low", price)
+    prev = info.get("prev", price)
+    return {
+        "t": tag,
+        "a": name,
+        "b": f"{price:.2f}",
+        "c": f"{pct:+.2f}",
+        "d": code,
+        "e": f"{chg:+.2f},{high:.2f},{low:.2f},{prev:.2f}"
+    }
+
+
+def make_stock_trend_item(code: str, info: Dict[str, Any]) -> Dict[str, str]:
+    price = info.get("price", 3000.0)
+    prev = info.get("prev", price)
+    pts = None
+    try:
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={code}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        node = (d.get("data") or {}).get(code) or {}
+        rows = (node.get("data") or {}).get("data") or []
+        qt = (node.get("qt") or {}).get(code) or []
+        pre_live = _safe_float(qt[4]) if len(qt) > 4 else prev
+        prices = [_safe_float(r.split()[1]) for r in rows if len(r.split()) > 1]
+        if prices and pre_live > 0:
+            step = max(1, len(prices) // 40)
+            sampled = prices[::step][:40]
+            if sampled[-1] != prices[-1]:
+                sampled.append(prices[-1])
+            pts = [int(round((p - pre_live) / pre_live * 10000)) for p in sampled]
+    except Exception:
+        pts = None
+    if not pts:
+        pts = [0, 12, 18, 25, 30, 22, 15, 40, 45, 52, 50, 48, 55, 57]
+    high = info.get("high", price * 1.01)
+    low = info.get("low", price * 0.99)
+    return {
+        "t": "trend",
+        "a": ",".join(str(x) for x in pts),
+        "b": f"{prev:.2f}",
+        "c": code,
+        "d": "241",
+        "e": f"{high:.2f},{low:.2f},{price:.2f}"
+    }
+
+
+def make_stock_kline_item(code: str, info: Dict[str, Any]) -> Dict[str, str]:
+    name = info.get("name", code)
+    price = info.get("price", 100.0)
+    pct = info.get("pct", 0.0)
+    pts = None
+    try:
+        url = f"https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code},day,,,30,qfq"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        node = (d.get("data") or {}).get(code) or {}
+        rows = node.get("qfqday") or node.get("day") or []
+        closes = [_safe_float(r[2]) for r in rows if len(r) > 2 and _safe_float(r[2]) > 0]
+        if len(closes) >= 2:
+            first = closes[0]
+            pts = [int(round((c - first) / first * 1000)) for c in closes]
+    except Exception:
+        pts = None
+    if not pts:
+        pts = [-25, -18, -10, -5, 2, 8, 12, 10, 15, 18, 22, 25, 28, 30, 35, 42, 50, int(round(pct * 10))]
+    return {
+        "t": "k",
+        "a": name,
+        "b": ",".join(str(x) for x in pts),
+        "c": f"{price:.2f}",
+        "d": f"{pct:+.1f}",
+        "e": code
+    }
+
 
 def get_stocks(view: str = "home", codes: str = "sh600519,sz300750,sz000858", index: str = "sh000001") -> Dict[str, Any]:
     """Fetches stock market quotes, trends, and klines.
@@ -493,21 +688,234 @@ def get_stocks(view: str = "home", codes: str = "sh600519,sz300750,sz000858", in
     if hit:
         return hit
 
+    watch_codes = [stock_clean_code(c) for c in re.split(r"[,\s]+", codes) if c.strip()][:10]
+    if not watch_codes:
+        watch_codes = ["sh600519", "sz300750", "sz000858"]
+    idx_code = stock_clean_code(index) if index.strip() else "sh000001"
+
+    # Fetch live quotes concurrently
+    all_codes = list(dict.fromkeys(INDICES + watch_codes + [idx_code]))
+    live_quotes = {}
+    try:
+        live_quotes = fetch_live_stock_quotes(all_codes)
+    except Exception:
+        live_quotes = {}
+
+    def get_info(s: str) -> Dict[str, Any]:
+        if s in live_quotes:
+            return live_quotes[s]
+        if s in STOCK_FALLBACK_DATA:
+            return STOCK_FALLBACK_DATA[s]
+        return {"name": s, "price": 100.0, "pct": 0.50, "chg": 0.50, "high": 102.0, "low": 99.0, "prev": 99.50}
+
+    is_open = market_open()
     items: List[Dict[str, str]] = [
-        {"t": "meta", "a": "交易中", "b": "沪深市场", "c": "15:00"},
-        # Index quote
-        {"t": "quote", "a": "sh000001", "b": "上证指数", "c": "+0.57", "d": "3068.20", "e": "+17.20,3075.10,3051.00,3051.00"},
-        {"t": "quote", "a": "sz399001", "b": "深证成指", "c": "+0.82", "d": "9680.50", "e": "+78.60,9710.00,9610.00,9601.90"},
-        {"t": "quote", "a": "sz399006", "b": "创业板指", "c": "+1.15", "d": "1895.30", "e": "+21.50,1905.00,1875.00,1873.80"},
-        # Watch list stocks
-        {"t": "quote", "a": "sh600519", "b": "贵州茅台", "c": "+0.65", "d": "1580.00", "e": "+10.20,1590.00,1570.00,1569.80"},
-        {"t": "quote", "a": "sz300750", "b": "宁德时代", "c": "+2.35", "d": "245.50", "e": "+5.65,248.00,240.00,239.85"},
-        {"t": "quote", "a": "sz000858", "b": "五 粮 液", "c": "+0.45", "d": "142.20", "e": "+0.64,143.50,141.50,141.56"},
-        # Intraday trend curve points
-        {"t": "trend", "a": "12,18,25,30,22,15,40,45,52,50,48,55,57", "b": "100", "c": "0", "d": "241"},
-        # 30-day kline closes
-        {"t": "kline", "a": "-5,2,8,12,10,15,18,22,25,28,30,35,42,50,57"}
+        {"t": "meta", "a": "交易中" if is_open else "已收盘", "b": "沪深市场", "c": time.strftime("%H:%M", time.localtime())}
     ]
+
+    idx_items = [make_stock_item("idx", c, get_info(c)) for c in INDICES]
+    q_items = [make_stock_item("q", c, get_info(c)) for c in watch_codes]
+
+    if view == "home":
+        items += idx_items
+        items.append(make_stock_trend_item(idx_code, get_info(idx_code)))
+        items += q_items[:3]
+    elif view == "list":
+        items += q_items
+    elif view == "trend":
+        for c in INDICES[:3]:
+            items.append(make_stock_trend_item(c, get_info(c)))
+        items += idx_items[:3]
+    elif view == "kline":
+        for c in watch_codes[:6]:
+            items.append(make_stock_kline_item(c, get_info(c)))
+    else:  # view == "all" or aggregated
+        items += idx_items
+        items += q_items
+        for c in INDICES[:3]:
+            items.append(make_stock_trend_item(c, get_info(c)))
+        for c in watch_codes[:6]:
+            items.append(make_stock_kline_item(c, get_info(c)))
+
+    items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
+    data = {"items": items}
+    cache.set(cache_key, data, ttl_seconds=15 if is_open else 120)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# 4. Crypto Market (/app/crypto) - Supports view=all for all pages
+# ---------------------------------------------------------------------------
+
+CRYPTO_FALLBACK_DATA = {
+    "BTC": {"name": "BTC", "price": 81650.0, "open": 79700.0, "pct": 2.45, "high": 82500.0, "low": 80100.0, "vol": 3.2e8},
+    "ETH": {"name": "ETH", "price": 3520.5, "open": 3456.5, "pct": 1.85, "high": 3580.0, "low": 3440.0, "vol": 1.8e8},
+    "SOL": {"name": "SOL", "price": 158.4, "open": 150.6, "pct": 5.20, "high": 162.0, "low": 149.0, "vol": 6.5e7},
+    "BNB": {"name": "BNB", "price": 585.0, "open": 579.7, "pct": 0.92, "high": 592.0, "low": 578.0, "vol": 4.2e7},
+    "XRP": {"name": "XRP", "price": 0.582, "open": 0.575, "pct": 1.15, "high": 0.595, "low": 0.570, "vol": 3.1e7},
+    "DOGE": {"name": "DOGE", "price": 0.128, "open": 0.124, "pct": 3.40, "high": 0.132, "low": 0.122, "vol": 2.8e7},
+    "ADA": {"name": "ADA", "price": 0.355, "open": 0.352, "pct": 0.80, "high": 0.362, "low": 0.348, "vol": 1.9e7},
+}
+
+
+def crypto_clean_sym(s: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9]", "", s).upper()
+    return s[:-4] if s.endswith("USDT") and len(s) > 4 else s
+
+
+def fetch_live_crypto_ticker(sym: str) -> Optional[Dict[str, Any]]:
+    try:
+        url = f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        rows = d.get("data") or []
+        if rows:
+            r = rows[0]
+            last = _safe_float(r.get("last"))
+            open24 = _safe_float(r.get("open24h"))
+            high = _safe_float(r.get("high24h"))
+            low = _safe_float(r.get("low24h"))
+            vol = _safe_float(r.get("volCcy24h"))
+            if last > 0:
+                pct = ((last - open24) / open24 * 100) if open24 > 0 else 0.0
+                return {"price": last, "open": open24 or last, "high": high or last, "low": low or last, "vol": vol, "pct": pct}
+    except Exception:
+        pass
+    return None
+
+
+def make_crypto_item(sym: str, info: Dict[str, Any], rate: float) -> Dict[str, str]:
+    last = info.get("price", 100.0) * rate
+    pct = info.get("pct", 0.0)
+    high = info.get("high", last) * rate
+    low = info.get("low", last) * rate
+    vol = info.get("vol", 1e7) * rate
+    return {
+        "t": "c",
+        "a": sym,
+        "b": _fmt_price(last),
+        "c": f"{pct:+.2f}",
+        "d": f"{_fmt_price(high)},{_fmt_price(low)}",
+        "e": _fmt_vol(vol)
+    }
+
+
+def make_crypto_trend_item(chart_sym: str, info: Dict[str, Any], rate: float) -> Dict[str, str]:
+    last = info.get("price", 100.0) * rate
+    open24 = info.get("open", 100.0) * rate
+    pct = info.get("pct", 0.0)
+    high = info.get("high", last) * rate
+    low = info.get("low", last) * rate
+    vol = info.get("vol", 1e7) * rate
+    pts = None
+    try:
+        url = f"https://www.okx.com/api/v5/market/candles?instId={chart_sym}-USDT&bar=1H&limit=24"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        rows = d.get("data") or []
+        closes = [_safe_float(r[4]) for r in reversed(rows) if len(r) > 4 and _safe_float(r[4]) > 0]
+        if len(closes) >= 2 and open24 > 0:
+            pts = [int(round((c * rate - open24) / open24 * 10000)) for c in closes]
+    except Exception:
+        pts = None
+    if not pts:
+        pts = [0, 10, 20, 15, 25, 35, 30, 45, 55, 50, 60, int(round(pct * 100))]
+    return {
+        "t": "trend",
+        "a": ",".join(str(x) for x in pts),
+        "b": chart_sym,
+        "c": _fmt_price(last),
+        "d": f"{pct:+.2f}",
+        "e": f"{_fmt_price(high)},{_fmt_price(low)},{_fmt_vol(vol)}"
+    }
+
+
+def make_crypto_kline_item(sym: str, info: Dict[str, Any], rate: float) -> Dict[str, str]:
+    last = info.get("price", 100.0) * rate
+    pct = info.get("pct", 0.0)
+    pts = None
+    try:
+        url = f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1D&limit=8"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"})
+        with urllib.request.urlopen(req, timeout=3.0) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+        rows = d.get("data") or []
+        closes = [_safe_float(r[4]) for r in reversed(rows) if len(r) > 4 and _safe_float(r[4]) > 0]
+        if len(closes) >= 2 and closes[0] > 0:
+            first = closes[0]
+            pts = [int(round((c - first) / first * 1000)) for c in closes]
+    except Exception:
+        pts = None
+    if not pts:
+        pts = [-15, -10, -5, 5, 12, 18, 22, int(round(pct * 10))]
+    return {
+        "t": "k",
+        "a": sym,
+        "b": ",".join(str(x) for x in pts),
+        "c": _fmt_price(last),
+        "d": f"{pct:+.1f}",
+        "e": sym
+    }
+
+
+def get_crypto(view: str = "home", symbols: str = "BTC,ETH,SOL", chart: str = "", fiat: str = "usd") -> Dict[str, Any]:
+    """Fetches cryptocurrency quotes, trends, and klines.
+
+    Cached for 15 seconds.
+    """
+    cache_key = f"crypto:{view}:{symbols}:{chart}:{fiat}"
+    hit = cache.get(cache_key)
+    if hit:
+        return hit
+
+    sym_list = [crypto_clean_sym(s) for s in re.split(r"[,\s]+", symbols) if crypto_clean_sym(s)][:10]
+    if not sym_list:
+        sym_list = ["BTC", "ETH", "SOL", "BNB", "XRP"]
+    chart_sym = crypto_clean_sym(chart) if chart.strip() else sym_list[0]
+    is_cny = (fiat or "").strip().lower() == "cny"
+    rate = 7.25 if is_cny else 1.0
+
+    # Fetch live quotes concurrently
+    needed_syms = list(dict.fromkeys(sym_list + [chart_sym]))
+    info_map = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(needed_syms), 6)) as ex:
+        futs = {ex.submit(fetch_live_crypto_ticker, s): s for s in needed_syms}
+        for f in concurrent.futures.as_completed(futs):
+            s = futs[f]
+            try:
+                res = f.result()
+                if res:
+                    info_map[s] = res
+            except Exception:
+                pass
+
+    def get_info(s: str) -> Dict[str, Any]:
+        if s in info_map:
+            return info_map[s]
+        if s in CRYPTO_FALLBACK_DATA:
+            return CRYPTO_FALLBACK_DATA[s]
+        return {"name": s, "price": 100.0, "open": 98.0, "pct": 2.0, "high": 105.0, "low": 96.0, "vol": 1e7}
+
+    items: List[Dict[str, str]] = [
+        {"t": "meta", "a": "人民币" if is_cny else "USDT", "b": f"{rate:.4f}" if is_cny else "1"}
+    ]
+
+    coin_items = [make_crypto_item(s, get_info(s), rate) for s in sym_list]
+
+    if view == "list":
+        items += coin_items
+    elif view == "trend":
+        items.append(make_crypto_trend_item(chart_sym, get_info(chart_sym), rate))
+    elif view == "kline":
+        for s in sym_list[:6]:
+            items.append(make_crypto_kline_item(s, get_info(s), rate))
+    else:  # view == "all" or aggregated
+        items += coin_items
+        items.append(make_crypto_trend_item(chart_sym, get_info(chart_sym), rate))
+        for s in sym_list[:6]:
+            items.append(make_crypto_kline_item(s, get_info(s), rate))
 
     items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
     data = {"items": items}
@@ -516,56 +924,216 @@ def get_stocks(view: str = "home", codes: str = "sh600519,sz300750,sz000858", in
 
 
 # ---------------------------------------------------------------------------
-# 4. Crypto Market (/app/crypto) - Supports view=all for all pages
-# ---------------------------------------------------------------------------
-
-def get_crypto(view: str = "home", symbols: str = "BTC,ETH,SOL", fiat: str = "usd") -> Dict[str, Any]:
-    """Fetches cryptocurrency quotes and trends.
-
-    Cached for 10 seconds.
-    """
-    cache_key = f"crypto:{view}:{symbols}:{fiat}"
-    hit = cache.get(cache_key)
-    if hit:
-        return hit
-
-    items = [
-        {"t": "meta", "a": "24H交易", "b": "全球市场"},
-        {"t": "quote", "a": "BTC", "b": "Bitcoin", "c": "+2.45", "d": "66850.00", "e": "+1600.00,67200.00,65100.00,65250.00"},
-        {"t": "quote", "a": "ETH", "b": "Ethereum", "c": "+1.85", "d": "3520.50", "e": "+64.00,3560.00,3440.00,3456.50"},
-        {"t": "quote", "a": "SOL", "b": "Solana", "c": "+5.20", "d": "158.40", "e": "+7.80,162.00,149.00,150.60"},
-        {"t": "trend", "a": "10,20,15,25,35,30,45,55,50,60,65", "b": "100", "c": "0", "d": "100"},
-        {"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())}
-    ]
-    data = {"items": items}
-    cache.set(cache_key, data, ttl_seconds=10)
-    return data
-
-
-# ---------------------------------------------------------------------------
 # 5. Futures Market (/app/futures) - Supports view=all for all pages
 # ---------------------------------------------------------------------------
 
-def get_futures(view: str = "home", codes: str = "RB0,AU0,CU0") -> Dict[str, Any]:
-    """Fetches futures contracts and trends.
+SINA_HEADERS = {
+    "Referer": "https://finance.sina.com.cn",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MiniScheme-Proxy/1.0"
+}
+SINA_FUTURES_API = "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20t=/InnerFuturesNewService."
+CFFEX_PRODUCTS = ("IF", "IH", "IC", "IM", "T", "TF", "TS", "TL")
+
+FUTURES_FALLBACK_DATA = {
+    "RB0": {"name": "螺纹主力", "price": 3086.0, "pct": 0.45, "high": 3088.0, "low": 3069.0, "prev": 3072.0, "chg": 14.0},
+    "AU0": {"name": "沪金主力", "price": 595.60, "pct": 0.42, "high": 598.0, "low": 592.5, "prev": 593.10, "chg": 2.50},
+    "AG0": {"name": "沪银主力", "price": 7450.0, "pct": 0.54, "high": 7520.0, "low": 7380.0, "prev": 7410.0, "chg": 40.0},
+    "SC0": {"name": "原油主力", "price": 535.2, "pct": -1.04, "high": 542.0, "low": 532.5, "prev": 540.8, "chg": -5.6},
+    "CU0": {"name": "沪铜主力", "price": 78200.0, "pct": 1.12, "high": 78500.0, "low": 77200.0, "prev": 77330.0, "chg": 870.0},
+    "M0":  {"name": "豆粕主力", "price": 3025.0, "pct": 0.50, "high": 3045.0, "low": 2998.0, "prev": 3010.0, "chg": 15.0},
+    "IF0": {"name": "沪深300", "price": 3885.0, "pct": 0.60, "high": 3910.0, "low": 3855.0, "prev": 3862.0, "chg": 23.0},
+}
+
+
+def futures_clean_code(c: str) -> str:
+    c = c.strip().upper()
+    return c[3:] if c.startswith("NF_") else c
+
+
+def fetch_live_futures_quotes(codes_list: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not codes_list:
+        return {}
+    url = "https://hq.sinajs.cn/list=" + ",".join("nf_" + c for c in codes_list)
+    req = urllib.request.Request(url, headers=SINA_HEADERS)
+    with urllib.request.urlopen(req, timeout=4.0) as resp:
+        text = resp.read().decode("gbk", "replace")
+    results = {}
+    for m in re.finditer(r'hq_str_nf_(\w+)="([^"]*)"', text):
+        c = m.group(1).upper()
+        f = m.group(2).split(',')
+        if len(f) < 18:
+            continue
+        prod = re.match(r'^[A-Z]+', c)
+        prod_code = prod.group(0) if prod else ""
+        if prod_code in CFFEX_PRODUCTS and len(f) > 49:
+            name, last, high, low, prev = f[49], _safe_float(f[3]), _safe_float(f[1]), _safe_float(f[2]), _safe_float(f[14])
+        else:
+            name, last, high, low, prev = f[0], _safe_float(f[8]), _safe_float(f[3]), _safe_float(f[4]), _safe_float(f[10])
+        if not last:
+            last = prev
+        if not prev or prev <= 0:
+            continue
+        chg = last - prev
+        pct = (chg / prev) * 100
+        clean_name = name.replace("连续", "").replace("主力", "").strip() or c
+        if not clean_name.endswith("主力") and prod_code not in CFFEX_PRODUCTS:
+            clean_name += "主力"
+        results[c] = {
+            "name": clean_name[:8],
+            "price": last,
+            "pct": pct,
+            "chg": chg,
+            "high": high or last,
+            "low": low or last,
+            "prev": prev
+        }
+    return results
+
+
+def make_futures_quote_item(c: str, info: Dict[str, Any]) -> Dict[str, str]:
+    name = info.get("name", c)
+    last = info.get("price", 3000.0)
+    pct = info.get("pct", 0.0)
+    chg = info.get("chg", 0.0)
+    high = info.get("high", last)
+    low = info.get("low", last)
+    prev = info.get("prev", last)
+    return {
+        "t": "q",
+        "a": name,
+        "b": _fmt_price(last),
+        "c": f"{pct:+.2f}",
+        "d": c,
+        "e": f"{'+' if chg >= 0 else '-'}{_fmt_price(abs(chg))},{_fmt_price(high)},{_fmt_price(low)},{_fmt_price(prev)}"
+    }
+
+
+def make_futures_trend_item(code: str, info: Dict[str, Any]) -> Dict[str, str]:
+    last = info.get("price", 3000.0)
+    prev = info.get("prev", last)
+    pts = None
+    try:
+        url = f"{SINA_FUTURES_API}getMinLine?symbol={urllib.parse.quote(code)}"
+        req = urllib.request.Request(url, headers=SINA_HEADERS)
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+        start = raw.find("(")
+        end = raw.rfind(")")
+        if start >= 0 and end > start:
+            rows = json.loads(raw[start + 1:end])
+            prices = [_safe_float(r[1]) for r in rows if isinstance(r, list) and len(r) > 1 and _safe_float(r[1]) > 0]
+            if prices:
+                pre = prev or (_safe_float(rows[0][5]) if rows and len(rows[0]) > 5 else 0.0)
+                if pre <= 0:
+                    pre = prices[0]
+                step = max(1, len(prices) // 40)
+                sampled = prices[::step][:40]
+                if sampled[-1] != prices[-1]:
+                    sampled.append(prices[-1])
+                pts = [int(round((p - pre) / pre * 10000)) for p in sampled]
+    except Exception:
+        pts = None
+    if not pts:
+        pts = [0, 5, 12, 18, 22, 20, 28, 32, 35, 40, 42]
+    high = info.get("high", max(prev, last))
+    low = info.get("low", min(prev, last))
+    return {
+        "t": "trend",
+        "a": ",".join(str(x) for x in pts),
+        "b": _fmt_price(prev),
+        "c": code,
+        "d": "240",
+        "e": f"{_fmt_price(high)},{_fmt_price(low)},{_fmt_price(last)}"
+    }
+
+
+def make_futures_kline_item(code: str, info: Dict[str, Any]) -> Dict[str, str]:
+    name = info.get("name", code)
+    last = info.get("price", 3000.0)
+    pct = info.get("pct", 0.0)
+    pts = None
+    try:
+        url = f"{SINA_FUTURES_API}getDailyKLine?symbol={urllib.parse.quote(code)}"
+        req = urllib.request.Request(url, headers=SINA_HEADERS)
+        with urllib.request.urlopen(req, timeout=3.5) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+        start = raw.find("(")
+        end = raw.rfind(")")
+        if start >= 0 and end > start:
+            rows = json.loads(raw[start + 1:end])
+            closes = [_safe_float(r.get("c")) for r in rows[-30:] if isinstance(r, dict)]
+            closes = [x for x in closes if x > 0]
+            if len(closes) >= 2:
+                first = closes[0]
+                pts = [int(round((x - first) / first * 1000)) for x in closes]
+    except Exception:
+        pts = None
+    if not pts:
+        pts = [-25, -20, -15, -10, -5, 2, 8, 12, 10, 15, 18, 22, 25, 28, 30, 35, 42, 50, int(round(pct * 10))]
+    return {
+        "t": "k",
+        "a": name,
+        "b": ",".join(str(x) for x in pts),
+        "c": _fmt_price(last),
+        "d": f"{pct:+.1f}",
+        "e": code
+    }
+
+
+def get_futures(view: str = "home", codes: str = "RB0,AU0,CU0", chart: str = "") -> Dict[str, Any]:
+    """Fetches futures contracts, trends, and klines.
 
     Cached for 15 seconds.
     """
-    cache_key = f"futures:{view}:{codes}"
+    cache_key = f"futures:{view}:{codes}:{chart}"
     hit = cache.get(cache_key)
     if hit:
         return hit
 
-    items = [
-        {"t": "meta", "a": "交易中", "b": "国内期货"},
-        {"t": "quote", "a": "RB0", "b": "螺纹主力", "c": "+0.75", "d": "3420", "e": "+25,3440,3390,3395"},
-        {"t": "quote", "a": "AU0", "b": "沪金主力", "c": "+0.42", "d": "595.60", "e": "+2.50,598.00,592.50,593.10"},
-        {"t": "quote", "a": "CU0", "b": "沪铜主力", "c": "+1.12", "d": "78200", "e": "+870,78500,77200,77330"},
-        {"t": "trend", "a": "5,12,18,22,20,28,32,35,40,42", "b": "80", "c": "0", "d": "100"},
-        {"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())}
+    code_list = [futures_clean_code(c) for c in re.split(r"[,\s]+", codes) if futures_clean_code(c)][:10]
+    if not code_list:
+        code_list = ["RB0", "AU0", "CU0", "AG0", "SC0"]
+    chart_code = futures_clean_code(chart) if chart.strip() else code_list[0]
+
+    # Fetch live quotes concurrently
+    needed_codes = list(dict.fromkeys(code_list + [chart_code]))
+    live_quotes = {}
+    try:
+        live_quotes = fetch_live_futures_quotes(needed_codes)
+    except Exception:
+        live_quotes = {}
+
+    def get_info(c: str) -> Dict[str, Any]:
+        if c in live_quotes:
+            return live_quotes[c]
+        if c in FUTURES_FALLBACK_DATA:
+            return FUTURES_FALLBACK_DATA[c]
+        return {"name": c, "price": 3000.0, "pct": 0.50, "chg": 15.0, "high": 3050.0, "low": 2980.0, "prev": 2985.0}
+
+    is_open = futures_open()
+    items: List[Dict[str, str]] = [
+        {"t": "meta", "a": "交易中" if is_open else "休市", "b": time.strftime("%H:%M", time.localtime())}
     ]
+
+    q_items = [make_futures_quote_item(c, get_info(c)) for c in code_list]
+
+    if view == "list":
+        items += q_items
+    elif view == "trend":
+        items.append(make_futures_quote_item(chart_code, get_info(chart_code)))
+        items.append(make_futures_trend_item(chart_code, get_info(chart_code)))
+    elif view == "kline":
+        for c in code_list[:6]:
+            items.append(make_futures_kline_item(c, get_info(c)))
+    else:  # view == "all" or aggregated
+        items += q_items
+        items.append(make_futures_trend_item(chart_code, get_info(chart_code)))
+        for c in code_list[:6]:
+            items.append(make_futures_kline_item(c, get_info(c)))
+
+    items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
     data = {"items": items}
-    cache.set(cache_key, data, ttl_seconds=15)
+    cache.set(cache_key, data, ttl_seconds=15 if is_open else 120)
     return data
 
 
@@ -662,9 +1230,18 @@ def handle_app_query(path_with_query: str):
             qs.get("index", ["sh000001"])[0]
         )
     elif path == "/app/crypto":
-        data = get_crypto(qs.get("view", ["all"])[0], qs.get("symbols", ["BTC,ETH,SOL"])[0])
+        data = get_crypto(
+            view=qs.get("view", ["all"])[0],
+            symbols=qs.get("symbols", ["BTC,ETH,SOL"])[0],
+            chart=qs.get("chart", [""])[0],
+            fiat=qs.get("fiat", ["usd"])[0]
+        )
     elif path == "/app/futures":
-        data = get_futures(qs.get("view", ["all"])[0], qs.get("codes", ["RB0,AU0,CU0"])[0])
+        data = get_futures(
+            view=qs.get("view", ["all"])[0],
+            codes=qs.get("codes", ["RB0,AU0,CU0"])[0],
+            chart=qs.get("chart", [""])[0]
+        )
     elif path == "/app/calendar":
         data = get_calendar(
             qs.get("view", ["today"])[0],

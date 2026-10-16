@@ -126,11 +126,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path == "/app/crypto":
             view = qs.get("view", ["all"])[0]
             symbols = qs.get("symbols", ["BTC,ETH,SOL"])[0]
-            return self._send_json(get_crypto(view, symbols))
+            chart = qs.get("chart", [""])[0]
+            fiat = qs.get("fiat", ["usd"])[0]
+            return self._send_json(get_crypto(view, symbols, chart, fiat))
         if path == "/app/futures":
             view = qs.get("view", ["all"])[0]
             codes = qs.get("codes", ["RB0,AU0,CU0"])[0]
-            return self._send_json(get_futures(view, codes))
+            chart = qs.get("chart", [""])[0]
+            return self._send_json(get_futures(view, codes, chart))
         if path == "/app/news":
             cat = qs.get("cat", ["all"])[0]
             n = int(qs.get("n", ["8"])[0])
@@ -402,11 +405,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/app/crypto":
             view = qs.get("view", ["all"])[0]
             symbols = qs.get("symbols", ["BTC,ETH,SOL"])[0]
-            resp_body = json.dumps(get_crypto(view, symbols)).encode("utf-8")
+            chart = qs.get("chart", [""])[0]
+            fiat = qs.get("fiat", ["usd"])[0]
+            resp_body = json.dumps(get_crypto(view, symbols, chart, fiat)).encode("utf-8")
         elif path == "/app/futures":
             view = qs.get("view", ["all"])[0]
             codes = qs.get("codes", ["RB0,AU0,CU0"])[0]
-            resp_body = json.dumps(get_futures(view, codes)).encode("utf-8")
+            chart = qs.get("chart", [""])[0]
+            resp_body = json.dumps(get_futures(view, codes, chart)).encode("utf-8")
         elif path == "/app/news":
             cat = qs.get("cat", ["all"])[0]
             n = int(qs.get("n", ["8"])[0])

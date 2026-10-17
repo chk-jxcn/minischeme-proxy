@@ -54,6 +54,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
         self.wfile.write(body)
 
@@ -62,6 +63,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
         self.wfile.write(body)
 
@@ -70,12 +73,33 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
         self.end_headers()
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
+
+        # Health & Server Discovery API
+        if path == "/health":
+            return self._send_json({
+                "status": "ok",
+                "protocol_mode": getattr(self.server_ctx, "protocol_mode", "both"),
+                "time": int(time.time()),
+            })
+
+        if path == "/api/server_info":
+            mode = getattr(self.server_ctx, "protocol_mode", "both")
+            port = getattr(self.server_ctx, "server_port", 8087)
+            return self._send_json({
+                "success": True,
+                "proxy_server": True,
+                "port": port,
+                "protocol_mode": mode,
+                "components": ["proxy", "converter", "portal"],
+                "time": int(time.time()),
+            })
 
         # Web Portals
         if path == "/user" or path == "/user/":

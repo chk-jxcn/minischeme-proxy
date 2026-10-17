@@ -167,17 +167,17 @@ def test_per_app_endpoints(proxy_server):
     s_req = urllib.request.urlopen(f"{base_url}/app/stocks?view=all")
     s_data = json.loads(s_req.read().decode())
     s_types = {it["t"] for it in s_data["items"]}
-    assert "quote" in s_types and "trend" in s_types and "kline" in s_types
+    assert ("q" in s_types or "quote" in s_types) and "trend" in s_types and ("k" in s_types or "kline" in s_types)
 
     # 4. Crypto: view=all
     c_req = urllib.request.urlopen(f"{base_url}/app/crypto?view=all")
     c_data = json.loads(c_req.read().decode())
-    assert any(it["t"] == "crypto" or it["t"] == "quote" for it in c_data["items"])
+    assert any(it["t"] in ("crypto", "quote", "c", "q") for it in c_data["items"])
 
     # 5. Futures: view=all
     f_req = urllib.request.urlopen(f"{base_url}/app/futures?view=all")
     f_data = json.loads(f_req.read().decode())
-    assert any(it["t"] == "quote" for it in f_data["items"])
+    assert any(it["t"] in ("quote", "q") for it in f_data["items"])
 
 
 def test_weather_with_token_and_non_persistence(proxy_server):

@@ -21,8 +21,20 @@ from .crypto import (
 )
 from .database import Database
 from .endpoints import get_weather, get_stocks, get_crypto, get_news, get_futures
-from .user_portal import USER_HTML, generate_user_nonce, verify_user_login, check_user_session
-from .admin_portal import ADMIN_HTML, create_admin_session, verify_admin_session
+from .user_portal import (
+    USER_HTML,
+    generate_user_nonce,
+    verify_user_login,
+    verify_simulator_login,
+    check_user_session,
+    remove_user_session,
+)
+from .admin_portal import (
+    ADMIN_HTML,
+    create_admin_session,
+    verify_admin_session,
+    remove_admin_session,
+)
 
 CHANNEL_SKEW_SECONDS = 300  # ±5 minutes anti-replay window
 
@@ -96,6 +108,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return self._send_json({"success": True, "items": items})
 
         # Admin API
+        if path == "/api/admin/status":
+            mode = getattr(self.server_ctx, "protocol_mode", "both")
+            pwd = getattr(self.server_ctx, "admin_password", "admin")
+            auth_req = (mode == "encrypted" or pwd != "admin")
+            resp = {"success": True, "auth_required": auth_req, "protocol_mode": mode}
+            if not auth_req:
+                resp["token"] = create_admin_session()
+            return self._send_json(resp)
+
         if path == "/api/admin/devices":
             token = qs.get("token", [""])[0]
             if not verify_admin_session(token):
@@ -112,6 +133,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return self._send_json({"success": True, "items": items})
 
         # Plain app endpoints (dedicated per-app interfaces)
+        if path.startswith("/app/"):
+            if getattr(self.server_ctx, "protocol_mode", "both") == "encrypted":
+                return self._send_json({
+                    "success": False,
+                    "error": "Plaintext protocol is disabled on this server. Encrypted channel protocol (MSC1) is required."
+                }, 403)
+
         if path == "/app/weather":
             loc = qs.get("loc", ["auto"])[0]
             token = qs.get("token", [""])[0]
@@ -149,6 +177,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         path = parsed.path
         length = int(self.headers.get("Content-Length", 0))
         raw_body = self.rfile.read(length) if length > 0 else b""
+
+        if path.startswith("/channel") and getattr(self.server_ctx, "protocol_mode", "both") == "unencrypted":
+            return self._send_json({
+                "success": False,
+                "error": "Encrypted channel protocol is disabled on this server. Plaintext protocol is required."
+            }, 403)
 
         # 1. Step 2: Device First Registration
         if path == "/channel/register":
@@ -316,8 +350,76 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return self._send_json({"success": True, "token": res})
             return self._send_json({"success": False, "error": res}, 403)
 
+        if path == "/api/user/sim_register":
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                uuid = payload.get("uuid", "")
+                if not uuid:
+                    return self._send_json({"success": False, "error": "missing uuid"}, 400)
+                client_ip = self.client_address[0]
+                self.server_ctx.db.register_simulator(uuid, client_ip)
+                return self._send_json({"success": True})
+            except Exception as e:
+                return self._send_json({"success": False, "error": str(e)}, 400)
+
+        if path == "/api/user/sim_login":
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                uuid = payload.get("uuid", "")
+                if not uuid:
+                    return self._send_json({"success": False, "error": "missing uuid"}, 400)
+                client_ip = self.client_address[0]
+                ok, res = verify_simulator_login(uuid, self.server_ctx.db, client_ip)
+                if ok:
+                    return self._send_json({"success": True, "token": res, "mac": uuid.upper()})
+                return self._send_json({"success": False, "error": res}, 400)
+            except Exception as e:
+                return self._send_json({"success": False, "error": str(e)}, 400)
+
+        if path == "/api/user/data/clear":
+            qs = urllib.parse.parse_qs(parsed.query)
+            try:
+                payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+            except Exception:
+                payload = {}
+            mac = payload.get("mac") or qs.get("mac", [""])[0]
+            token = payload.get("token") or qs.get("token", [""])[0]
+            app_id = payload.get("app_id") or qs.get("app_id", [""])[0]
+            if not check_user_session(token, mac):
+                return self._send_json({"success": False, "error": "unauthorized"}, 401)
+            if not app_id or app_id == "all":
+                self.server_ctx.db.clear_all_app_data(mac)
+            else:
+                self.server_ctx.db.clear_app_data(mac, app_id)
+            return self._send_json({"success": True})
+
+        if path == "/api/user/account/delete":
+            qs = urllib.parse.parse_qs(parsed.query)
+            try:
+                payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+            except Exception:
+                payload = {}
+            mac = payload.get("mac") or qs.get("mac", [""])[0]
+            token = payload.get("token") or qs.get("token", [""])[0]
+            if not check_user_session(token, mac):
+                return self._send_json({"success": False, "error": "unauthorized"}, 401)
+            self.server_ctx.db.delete_device_account(mac)
+            remove_user_session(token)
+            return self._send_json({"success": True})
+
+        if path == "/api/user/logout":
+            try:
+                payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+                remove_user_session(payload.get("token", ""))
+            except Exception:
+                pass
+            return self._send_json({"success": True})
+
         # Admin Portal Login
         if path == "/api/admin/login":
+            delay = getattr(self.server_ctx, "admin_login_delay", 0)
+            if delay > 0:
+                time.sleep(delay)
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
                 pwd = payload["password"]
@@ -328,6 +430,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 token = create_admin_session()
                 return self._send_json({"success": True, "token": token})
             return self._send_json({"success": False, "error": "password incorrect"}, 403)
+
+        if path == "/api/admin/logout":
+            try:
+                payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+                remove_admin_session(payload.get("token", ""))
+            except Exception:
+                pass
+            return self._send_json({"success": True})
 
         # Admin Preset User Data
         if path == "/api/admin/preset":
@@ -341,6 +451,30 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 key = payload["key"]
                 val = payload["value"]
                 self.server_ctx.db.set_app_data(mac, app_id, key, val)
+                return self._send_json({"success": True})
+            except Exception as e:
+                return self._send_json({"success": False, "error": str(e)}, 400)
+
+        if path == "/api/admin/device/clear":
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                token = payload.get("token", "")
+                if not verify_admin_session(token):
+                    return self._send_json({"success": False, "error": "unauthorized"}, 401)
+                mac = payload["mac"]
+                self.server_ctx.db.clear_all_app_data(mac)
+                return self._send_json({"success": True})
+            except Exception as e:
+                return self._send_json({"success": False, "error": str(e)}, 400)
+
+        if path == "/api/admin/device/delete":
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+                token = payload.get("token", "")
+                if not verify_admin_session(token):
+                    return self._send_json({"success": False, "error": "unauthorized"}, 401)
+                mac = payload["mac"]
+                self.server_ctx.db.delete_device_account(mac)
                 return self._send_json({"success": True})
             except Exception as e:
                 return self._send_json({"success": False, "error": str(e)}, 400)
@@ -440,9 +574,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 class ProxyServer(http.server.ThreadingHTTPServer):
-    def __init__(self, server_address, master_key_1: bytes, admin_password: str, db_path: str = "minischeme_proxy.db"):
+    def __init__(self, server_address, master_key_1: bytes, admin_password: str, db_path: str = "minischeme_proxy.db", protocol_mode: str = "both", admin_login_delay: int = 0):
         super().__init__(server_address, ProxyHandler)
         self.master_key_1 = master_key_1
         self.admin_password = admin_password
         self.db = Database(db_path)
         self.recovery_challenges: dict = {}
+        self.protocol_mode = (protocol_mode or "both").lower().strip()
+        self.admin_login_delay = max(0, admin_login_delay or 0)

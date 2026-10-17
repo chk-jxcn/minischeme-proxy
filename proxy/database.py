@@ -6,6 +6,15 @@ import time
 from typing import Dict, List, Optional, Tuple, Any
 
 
+def normalize_device_id(id_str: str) -> str:
+    """Normalizes MAC addresses and simulator UUIDs into standard canonical formats."""
+    s = (id_str or "").strip().upper()
+    if s.startswith("SIM"):
+        parts = [p for p in s.replace(":", "-").split("-") if p]
+        return "-".join(parts)
+    return s.replace(":", "").replace("-", "")
+
+
 def mask_sensitive_value(key: str, val: str) -> str:
     """Masks tokens, secrets, passwords, and keys with asterisks."""
     k_lower = key.lower()
@@ -98,7 +107,7 @@ class Database:
             conn.commit()
 
     def register_device(self, mac: str, hw_hash_key: bytes, master_key_2: bytes, ip: str = "") -> bool:
-        clean_mac = mac.replace(":", "").replace("-", "").upper()
+        clean_mac = normalize_device_id(mac)
         now = int(time.time())
         with self._get_conn() as conn:
             conn.execute("""
@@ -113,22 +122,39 @@ class Database:
             conn.commit()
             return True
 
+    def register_simulator(self, sim_id: str, ip: str = "") -> bool:
+        clean_id = normalize_device_id(sim_id)
+        if not clean_id.startswith("SIM"):
+            clean_id = f"SIM-{clean_id}"
+        now = int(time.time())
+        with self._get_conn() as conn:
+            conn.execute("""
+                INSERT INTO devices (mac, hardware_hash_key, master_key_2, created_at, last_seen_at, last_ip, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'simulator')
+                ON CONFLICT(mac) DO UPDATE SET
+                    last_seen_at=excluded.last_seen_at,
+                    last_ip=excluded.last_ip,
+                    status='simulator'
+            """, (clean_id, b"SIMULATOR", b"SIMULATOR", now, now, ip))
+            conn.commit()
+            return True
+
     def get_device(self, mac: str) -> Optional[Dict[str, Any]]:
-        clean_mac = mac.replace(":", "").replace("-", "").upper()
+        clean_mac = normalize_device_id(mac)
         with self._get_conn() as conn:
             cur = conn.execute("SELECT * FROM devices WHERE mac = ?", (clean_mac,))
             row = cur.fetchone()
             return dict(row) if row else None
 
     def update_device_seen(self, mac: str, ip: str = ""):
-        clean_mac = mac.replace(":", "").replace("-", "").upper()
+        clean_mac = normalize_device_id(mac)
         now = int(time.time())
         with self._get_conn() as conn:
             conn.execute("UPDATE devices SET last_seen_at = ?, last_ip = ? WHERE mac = ?", (now, ip, clean_mac))
             conn.commit()
 
     def log_access(self, mac: str, ip: str, method: str, endpoint: str, status_code: int, bytes_transferred: int):
-        clean_mac = mac.replace(":", "").replace("-", "").upper()
+        clean_mac = normalize_device_id(mac)
         now = int(time.time())
         with self._get_conn() as conn:
             conn.execute("""
@@ -138,7 +164,7 @@ class Database:
             conn.commit()
 
     def get_device_logs(self, mac: str, limit: int = 50) -> List[Dict[str, Any]]:
-        clean_mac = mac.replace(":", "").replace("-", "").upper()
+        clean_mac = normalize_device_id(mac)
         with self._get_conn() as conn:
             cur = conn.execute("""
                 SELECT ip, method, endpoint, status_code, bytes_transferred, timestamp
@@ -147,7 +173,7 @@ class Database:
             return [dict(r) for r in cur.fetchall()]
 
     def set_app_data(self, mac: str, app_id: str, key: str, value: str):
-        clean_mac = mac.replace(":", "").replace("-", "").upper()
+        clean_mac = normalize_device_id(mac)
         now = int(time.time())
         with self._get_conn() as conn:
             conn.execute("""
@@ -160,7 +186,7 @@ class Database:
             conn.commit()
 
     def get_app_data(self, mac: str, app_id: Optional[str] = None, masked: bool = False) -> List[Dict[str, Any]]:
-        clean_mac = mac.replace(":", "").replace("-", "").upper()
+        clean_mac = normalize_device_id(mac)
         with self._get_conn() as conn:
             if app_id:
                 cur = conn.execute("SELECT app_id, key, value, updated_at FROM app_data WHERE mac = ? AND app_id = ?", (clean_mac, app_id))
@@ -175,13 +201,19 @@ class Database:
             return items
 
     def clear_app_data(self, mac: str, app_id: str):
-        clean_mac = mac.replace(":", "").replace("-", "").upper()
+        clean_mac = normalize_device_id(mac)
         with self._get_conn() as conn:
             conn.execute("DELETE FROM app_data WHERE mac = ? AND app_id = ?", (clean_mac, app_id))
             conn.commit()
 
+    def clear_all_app_data(self, mac: str):
+        clean_mac = normalize_device_id(mac)
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM app_data WHERE mac = ?", (clean_mac,))
+            conn.commit()
+
     def delete_device_account(self, mac: str):
-        clean_mac = mac.replace(":", "").replace("-", "").upper()
+        clean_mac = normalize_device_id(mac)
         with self._get_conn() as conn:
             conn.execute("DELETE FROM devices WHERE mac = ?", (clean_mac,))
             conn.execute("DELETE FROM app_data WHERE mac = ?", (clean_mac,))

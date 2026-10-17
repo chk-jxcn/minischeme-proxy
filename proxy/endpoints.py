@@ -283,8 +283,14 @@ def build_fallback_weather(loc: str, fallback_provider: str = "MiniScheme-Proxy"
     now_struct = time.localtime()
     now_hhmm = time.strftime("%H:%M", now_struct)
 
+    provider_str = fallback_provider
+    if "演示数据" not in provider_str:
+        provider_str = f"{provider_str}【演示数据】"
+
     items: List[Dict[str, Any]] = [
-        {"t": "loc", "a": city_name, "b": fallback_provider, "c": now_hhmm},
+        {"t": "demo", "a": "1", "b": "【演示数据】"},
+        {"t": "title", "a": "天气【演示数据】"},
+        {"t": "loc", "a": city_name, "b": provider_str, "c": now_hhmm},
         {"t": "now", "a": "22", "b": "晴", "c": "sun", "d": "21", "e": "45"},
         {"t": "now2", "a": "东北风", "b": "2级", "c": "1013", "d": "10", "e": ""},
     ]
@@ -376,14 +382,17 @@ def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "
         return hit
 
     items = None
+    is_demo = False
     if tok:
         items = fetch_qweather(loc, tok, hst)
 
     if not items:
+        is_demo = True
         provider = "MiniScheme-Proxy" if not tok else "和风天气(回退)"
         items = build_fallback_weather(loc, provider)
 
-    data = {"items": items}
+    title = "天气【演示数据】" if is_demo else "天气"
+    data = {"title": title, "is_demo": is_demo, "items": items}
     cache.set(cache_key, data, ttl_seconds=600)
     return data
 
@@ -473,7 +482,9 @@ def get_news(category: str = "realtime", n: int = 8) -> Dict[str, Any]:
             })
 
     items.append({"t": "upd", "a": now_str})
-    data = {"items": items}
+    items.insert(0, {"t": "demo", "a": "1", "b": "【演示数据】"})
+    items.insert(1, {"t": "title", "a": "热点新闻【演示数据】"})
+    data = {"title": "热点新闻【演示数据】", "is_demo": True, "items": items}
     cache.set(cache_key, data, ttl_seconds=300)
     return data
 
@@ -709,6 +720,7 @@ def get_stocks(view: str = "home", codes: str = "sh600519,sz300750,sz000858", in
         return {"name": s, "price": 100.0, "pct": 0.50, "chg": 0.50, "high": 102.0, "low": 99.0, "prev": 99.50}
 
     is_open = market_open()
+    is_demo = not bool(live_quotes)
     items: List[Dict[str, str]] = [
         {"t": "meta", "a": "交易中" if is_open else "已收盘", "b": "沪深市场", "c": time.strftime("%H:%M", time.localtime())}
     ]
@@ -738,7 +750,11 @@ def get_stocks(view: str = "home", codes: str = "sh600519,sz300750,sz000858", in
             items.append(make_stock_kline_item(c, get_info(c)))
 
     items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
-    data = {"items": items}
+    if is_demo:
+        items.insert(0, {"t": "demo", "a": "1", "b": "【演示数据】"})
+        items.insert(1, {"t": "title", "a": "股票行情【演示数据】"})
+    title = "股票行情【演示数据】" if is_demo else "股票行情"
+    data = {"title": title, "is_demo": is_demo, "items": items}
     cache.set(cache_key, data, ttl_seconds=15 if is_open else 120)
     return data
 
@@ -918,7 +934,12 @@ def get_crypto(view: str = "home", symbols: str = "BTC,ETH,SOL", chart: str = ""
             items.append(make_crypto_kline_item(s, get_info(s), rate))
 
     items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
-    data = {"items": items}
+    is_demo = not bool(info_map)
+    if is_demo:
+        items.insert(0, {"t": "demo", "a": "1", "b": "【演示数据】"})
+        items.insert(1, {"t": "title", "a": "加密货币【演示数据】"})
+    title = "加密货币【演示数据】" if is_demo else "加密货币"
+    data = {"title": title, "is_demo": is_demo, "items": items}
     cache.set(cache_key, data, ttl_seconds=15)
     return data
 
@@ -1132,7 +1153,12 @@ def get_futures(view: str = "home", codes: str = "RB0,AU0,CU0", chart: str = "")
             items.append(make_futures_kline_item(c, get_info(c)))
 
     items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
-    data = {"items": items}
+    is_demo = not bool(live_quotes)
+    if is_demo:
+        items.insert(0, {"t": "demo", "a": "1", "b": "【演示数据】"})
+        items.insert(1, {"t": "title", "a": "期货行情【演示数据】"})
+    title = "期货行情【演示数据】" if is_demo else "期货行情"
+    data = {"title": title, "is_demo": is_demo, "items": items}
     cache.set(cache_key, data, ttl_seconds=15 if is_open else 120)
     return data
 

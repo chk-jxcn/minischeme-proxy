@@ -82,39 +82,106 @@ pre { background: #f1f5f9; padding: 10px; border-radius: 6px; font-size: 13px; o
 </div>
 
 <script>
-let adminToken = '';
+let adminToken = localStorage.getItem('minischeme_admin_token') || '';
+
+function showLogin() {
+  document.getElementById('login-section').classList.remove('hidden');
+  document.getElementById('dashboard-section').classList.add('hidden');
+}
+
+function showDashboard() {
+  document.getElementById('login-section').classList.add('hidden');
+  document.getElementById('dashboard-section').classList.remove('hidden');
+}
+
+async function initAdminPortal() {
+  if (adminToken) {
+    const ok = await loadDevices();
+    if (ok) {
+      showDashboard();
+      return;
+    } else {
+      adminToken = '';
+      localStorage.removeItem('minischeme_admin_token');
+    }
+  }
+
+  // Check if server is local and allows passwordless login
+  try {
+    const r = await fetch('/api/admin/status');
+    const d = await r.json();
+    if (d.success && !d.auth_required && d.token) {
+      adminToken = d.token;
+      localStorage.setItem('minischeme_admin_token', adminToken);
+      showDashboard();
+      await loadDevices();
+      return;
+    }
+  } catch (e) {}
+
+  showLogin();
+}
 
 async function doAdminLogin() {
   const pwd = document.getElementById('admin-pwd').value;
-  const r = await fetch('/api/admin/login', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ password: pwd })
-  });
-  const d = await r.json();
-  if (d.success) {
-    adminToken = d.token;
-    document.getElementById('login-section').classList.add('hidden');
-    document.getElementById('dashboard-section').classList.remove('hidden');
-    loadDevices();
-  } else {
-    document.getElementById('login-msg').innerText = d.error || '登录失败，密码错误';
+  const msgEl = document.getElementById('login-msg');
+  msgEl.innerHTML = '<span style="color:#6366f1;">⏳ 正在校验管理员主密码，请稍候...</span>';
+  try {
+    const r = await fetch('/api/admin/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ password: pwd })
+    });
+    const d = await r.json();
+    if (d.success) {
+      adminToken = d.token;
+      localStorage.setItem('minischeme_admin_token', adminToken);
+      msgEl.innerText = '';
+      showDashboard();
+      loadDevices();
+    } else {
+      msgEl.innerText = d.error || '登录失败，密码错误';
+    }
+  } catch (e) {
+    msgEl.innerText = '登录请求失败: ' + e;
   }
 }
 
 async function loadDevices() {
-  const r = await fetch('/api/admin/devices?token=' + adminToken);
-  const d = await r.json();
-  const tbody = document.querySelector('#device-table tbody');
-  tbody.innerHTML = '';
-  if (d.devices && d.devices.length) {
-    d.devices.forEach(dev => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td><b>${dev.mac}</b></td><td>${new Date(dev.created_at*1000).toLocaleString()}</td><td>${new Date(dev.last_seen_at*1000).toLocaleString()}</td><td>${dev.last_ip || '-'}</td><td><span class="badge">${dev.status}</span></td><td>${dev.data_bytes} B</td><td><button style="padding:4px 8px;font-size:12px;" onclick="viewDetail('${dev.mac}')">明文审阅</button></td>`;
-      tbody.appendChild(tr);
-    });
-  } else {
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#94a3b8;">暂无注册设备</td></tr>';
+  if (!adminToken) return false;
+  try {
+    const r = await fetch('/api/admin/devices?token=' + adminToken);
+    if (!r.ok) return false;
+    const d = await r.json();
+    if (!d.success) return false;
+    const tbody = document.querySelector('#device-table tbody');
+    tbody.innerHTML = '';
+    if (d.devices && d.devices.length) {
+      d.devices.forEach(dev => {
+        const isSim = dev.status === 'simulator' || (dev.mac && dev.mac.startsWith('SIM-'));
+        const badge = isSim
+          ? '<span class="badge" style="background:#f3e8ff;color:#7e22ce;">🎮 WASM 模拟器</span>'
+          : `<span class="badge">${dev.status}</span>`;
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><b>${dev.mac}</b></td>` +
+          `<td>${new Date(dev.created_at*1000).toLocaleString()}</td>` +
+          `<td>${new Date(dev.last_seen_at*1000).toLocaleString()}</td>` +
+          `<td>${dev.last_ip || '-'}</td>` +
+          `<td>${badge}</td>` +
+          `<td>${dev.data_bytes} B</td>` +
+          `<td>` +
+          `<button style="padding:4px 8px;font-size:12px;margin-right:4px;" onclick="viewDetail('${dev.mac}')">明文审阅</button>` +
+          `<button style="padding:4px 8px;font-size:12px;margin-right:4px;background:#f59e0b;" onclick="clearDeviceData('${dev.mac}')">清空数据</button>` +
+          `<button style="padding:4px 8px;font-size:12px;background:#ef4444;" onclick="deleteDevice('${dev.mac}')">注销</button>` +
+          `</td>`;
+        tbody.appendChild(tr);
+      });
+    } else {
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:#94a3b8;">暂无注册设备</td></tr>';
+    }
+    return true;
+  } catch (e) {
+    return false;
   }
 }
 
@@ -138,6 +205,48 @@ async function viewDetail(mac) {
 
 function closeDetail() {
   document.getElementById('detail-modal').classList.add('hidden');
+}
+
+async function clearDeviceData(mac) {
+  if (!confirm(`确认清空设备 ${mac} 的所有应用配置数据？`)) return;
+  try {
+    const r = await fetch('/api/admin/device/clear', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token: adminToken, mac })
+    });
+    const d = await r.json();
+    if (d.success) {
+      alert('已清空该设备应用数据');
+      loadDevices();
+      closeDetail();
+    } else {
+      alert(d.error || '清空失败');
+    }
+  } catch (e) {
+    alert('请求失败: ' + e);
+  }
+}
+
+async function deleteDevice(mac) {
+  if (!confirm(`确认彻底注销并删除设备 ${mac} 及其所有记录？`)) return;
+  try {
+    const r = await fetch('/api/admin/device/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token: adminToken, mac })
+    });
+    const d = await r.json();
+    if (d.success) {
+      alert('设备已注销并删除');
+      loadDevices();
+      closeDetail();
+    } else {
+      alert(d.error || '注销失败');
+    }
+  } catch (e) {
+    alert('请求失败: ' + e);
+  }
 }
 
 function showPresetModal() {
@@ -171,8 +280,19 @@ async function savePreset() {
 }
 
 function doLogout() {
+  localStorage.removeItem('minischeme_admin_token');
+  try {
+    fetch('/api/admin/logout', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token: adminToken })
+    });
+  } catch (e) {}
+  adminToken = '';
   location.reload();
 }
+
+window.addEventListener('DOMContentLoaded', initAdminPortal);
 </script>
 </body>
 </html>
@@ -183,7 +303,8 @@ _admin_sessions: Dict[str, float] = {}
 
 def create_admin_session() -> str:
     token = secrets.token_hex(24)
-    _admin_sessions[token] = time.time() + 7200
+    # 30-day persistent session until manual logout
+    _admin_sessions[token] = time.time() + 86400 * 30
     return token
 
 
@@ -193,3 +314,8 @@ def verify_admin_session(token: str) -> bool:
             return True
         del _admin_sessions[token]
     return False
+
+
+def remove_admin_session(token: str):
+    if token in _admin_sessions:
+        del _admin_sessions[token]

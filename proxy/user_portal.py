@@ -22,11 +22,15 @@ input, button, select { padding: 10px 14px; border: 1px solid var(--border); bor
 button { background: var(--primary); color: white; border: none; cursor: pointer; font-weight: 500; }
 button:hover { opacity: 0.9; }
 button.danger { background: #ef4444; }
+button.secondary { background: #64748b; }
+.tab-btn { background: #f1f5f9; color: #475569; border: 1px solid var(--border); border-radius: 6px 6px 0 0; padding: 8px 16px; margin-right: 6px; }
+.tab-btn.active { background: var(--card); color: var(--primary); border-bottom-color: var(--card); font-weight: 600; }
 table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
 th, td { text-align: left; padding: 10px; border-bottom: 1px solid var(--border); }
 th { background: #f1f5f9; color: #475569; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 12px; background: #e0f2fe; color: #0369a1; }
-.masked { font-family: monospace; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; }
+.badge-sim { background: #f3e8ff; color: #7e22ce; }
+.masked { font-family: monospace; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; color: #0369a1; }
 .hidden { display: none; }
 </style>
 </head>
@@ -35,25 +39,45 @@ th { background: #f1f5f9; color: #475569; }
   <h1>MiniScheme 设备用户控制台</h1>
 
   <div id="login-section" class="card">
-    <h2>设备登录</h2>
-    <p>请输入硬件背面的 MAC 地址与初次配网设置的硬件密码：</p>
-    <div style="display:flex; gap:10px; flex-wrap:wrap;">
-      <input type="text" id="mac-input" placeholder="MAC地址 (例如 C8F09EB36C90)" style="flex:1;">
-      <input type="password" id="pwd-input" placeholder="硬件密码" style="flex:1;">
-      <button onclick="doLogin()">安全登录</button>
+    <div style="border-bottom: 1px solid var(--border); margin-bottom: 18px; display:flex;">
+      <button class="tab-btn active" id="tab-hw-btn" onclick="switchLoginTab('hw')">📱 物理硬件设备 (MAC + 硬件密码)</button>
+      <button class="tab-btn" id="tab-sim-btn" onclick="switchLoginTab('sim')">🎮 WASM 模拟器 (UUID 免密登录)</button>
     </div>
-    <div id="login-msg" style="margin-top:10px; color:#ef4444;"></div>
+
+    <!-- 硬件设备登录面板 -->
+    <div id="login-hw-panel">
+      <p style="margin-top:0;">请输入硬件背面的 MAC 地址与初次配网设置的硬件密码：</p>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <input type="text" id="mac-input" placeholder="MAC地址 (例如 C8F09EB36C90)" style="flex:1; min-width:200px;">
+        <input type="password" id="pwd-input" placeholder="硬件密码" style="flex:1; min-width:200px;">
+        <button onclick="doHwLogin()">安全登录</button>
+      </div>
+    </div>
+
+    <!-- 模拟器免密登录面板 -->
+    <div id="login-sim-panel" class="hidden">
+      <p style="margin-top:0;">输入 WebREPL 模拟器的独立 UUID（可在 WebREPL 后端服务连接与管理设置中查看与复制）：</p>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <input type="text" id="sim-uuid-input" placeholder="模拟器 UUID (例如 SIM-A1B2-C3D4)" style="flex:1; min-width:240px; font-family:monospace;">
+        <button onclick="doSimLogin()">免密直接登录</button>
+      </div>
+    </div>
+
+    <div id="login-msg" style="margin-top:12px; color:#ef4444; font-size:14px;"></div>
   </div>
 
   <div id="dashboard-section" class="card hidden">
-    <div style="display:flex; justify-content:space-between; align-items:center;">
-      <h2>设备信息: <span id="disp-mac" class="badge"></span></h2>
-      <button onclick="doLogout()" style="background:#64748b;">退出登录</button>
+    <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+      <h2>设备身份: <span id="disp-mac" class="badge"></span> <span id="disp-badge" class="badge"></span></h2>
+      <button onclick="doLogout()" class="secondary">退出登录</button>
     </div>
 
-    <h3>已存储的应用数据</h3>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:20px;">
+      <h3 style="margin:0;">已存储的应用数据</h3>
+      <button class="danger" style="padding:6px 14px; font-size:13px;" onclick="clearAllData()">🗑️ 一键清空全部数据</button>
+    </div>
     <table id="data-table">
-      <thead><tr><th>应用</th><th>键名</th><th>配置值 (敏感信息已脱敏)</th><th>更新时间</th><th>操作</th></tr></thead>
+      <thead><tr><th>应用</th><th>键名</th><th>配置值 (敏感密钥已脱敏)</th><th>更新时间</th><th>操作</th></tr></thead>
       <tbody></tbody>
     </table>
 
@@ -64,118 +88,264 @@ th { background: #f1f5f9; color: #475569; }
     </table>
 
     <h3 style="margin-top:30px; color:#ef4444;">危险区域</h3>
-    <p>注销设备账户将彻底清除该设备在公共服务器的所有应用配置与密钥，无法复原：</p>
+    <p>注销设备账户将彻底清除该设备在服务器的所有应用配置与密钥，无法复原：</p>
     <button class="danger" onclick="doDeleteAccount()">注销设备账户</button>
   </div>
 </div>
 
 <script>
-let curMac = '', sessionToken = '';
+let curMac = '', sessionToken = '', isSim = false;
 
-async function doLogin() {
-  const mac = document.getElementById('mac-input').value.trim().toUpperCase().replace(/[:-]/g, '');
-  const pwd = document.getElementById('pwd-input').value;
-  if (!mac || !pwd) return alert('请输入 MAC 地址和硬件密码');
-
-  // 1. Get challenge nonce from server
-  const rNonce = await fetch('/api/user/nonce?mac=' + mac);
-  const dNonce = await rNonce.json();
-  if (!dNonce.success) {
-    document.getElementById('login-msg').innerText = dNonce.error || '获取登录挑战失败';
-    return;
-  }
-
-  // 2. Hash password with nonce client-side (no plaintext on wire)
-  const enc = new TextEncoder();
-  const data = enc.encode(pwd + dNonce.nonce);
-  const hashBuf = await crypto.subtle.digest('SHA-256', data);
-  const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
-
-  // 3. Authenticate
-  const rAuth = await fetch('/api/user/login', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ mac: mac, hash: hashHex, nonce: dNonce.nonce })
-  });
-  const dAuth = await rAuth.json();
-  if (dAuth.success) {
-    curMac = mac;
-    sessionToken = dAuth.token;
-    document.getElementById('login-section').classList.add('hidden');
-    document.getElementById('dashboard-section').classList.remove('hidden');
-    document.getElementById('disp-mac').innerText = mac;
-    loadDashboard();
+function switchLoginTab(tab) {
+  const hwBtn = document.getElementById('tab-hw-btn');
+  const simBtn = document.getElementById('tab-sim-btn');
+  const hwPanel = document.getElementById('login-hw-panel');
+  const simPanel = document.getElementById('login-sim-panel');
+  document.getElementById('login-msg').innerText = '';
+  if (tab === 'sim') {
+    hwBtn.classList.remove('active');
+    simBtn.classList.add('active');
+    hwPanel.classList.add('hidden');
+    simPanel.classList.remove('hidden');
   } else {
-    document.getElementById('login-msg').innerText = dAuth.error || '登录失败，密码错误';
+    simBtn.classList.remove('active');
+    hwBtn.classList.add('active');
+    simPanel.classList.add('hidden');
+    hwPanel.classList.remove('hidden');
+  }
+}
+
+function doLogin() { return doHwLogin(); }
+
+async function doHwLogin() {
+  const macRaw = document.getElementById('mac-input').value.trim();
+  const pwd = document.getElementById('pwd-input').value;
+  if (!macRaw || !pwd) return alert('请输入 MAC 地址和硬件密码');
+  const mac = macRaw.replace(/[:-]/g, '').toUpperCase();
+  const msgEl = document.getElementById('login-msg');
+  msgEl.innerText = '正在验证挑战与凭据...';
+
+  try {
+    // 1. Get challenge nonce from server
+    const rNonce = await fetch('/api/user/nonce?mac=' + encodeURIComponent(mac));
+    const dNonce = await rNonce.json();
+    if (!dNonce.success) {
+      msgEl.innerText = dNonce.error || '获取登录挑战失败';
+      return;
+    }
+
+    // 2. Hash password with nonce client-side
+    const enc = new TextEncoder();
+    const data = enc.encode(pwd + dNonce.nonce);
+    const hashBuf = await crypto.subtle.digest('SHA-256', data);
+    const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+
+    // 3. Authenticate
+    const rAuth = await fetch('/api/user/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mac: mac, hash: hashHex, nonce: dNonce.nonce })
+    });
+    const dAuth = await rAuth.json();
+    if (dAuth.success) {
+      curMac = mac;
+      sessionToken = dAuth.token;
+      isSim = false;
+      saveSession();
+      showDashboardView();
+      loadDashboard();
+    } else {
+      msgEl.innerText = dAuth.error || '登录失败，密码错误';
+    }
+  } catch (e) {
+    msgEl.innerText = '登录请求异常: ' + e;
+  }
+}
+
+async function doSimLogin(directUuid) {
+  const uuid = (directUuid || document.getElementById('sim-uuid-input').value).trim().toUpperCase();
+  if (!uuid) return alert('请输入模拟器 UUID');
+  const msgEl = document.getElementById('login-msg');
+  msgEl.innerText = '正在连接模拟器会话...';
+
+  try {
+    const r = await fetch('/api/user/sim_login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ uuid: uuid })
+    });
+    const d = await r.json();
+    if (d.success) {
+      curMac = d.mac || uuid;
+      sessionToken = d.token;
+      isSim = true;
+      saveSession();
+      showDashboardView();
+      loadDashboard();
+    } else {
+      msgEl.innerText = d.error || '模拟器登录失败';
+    }
+  } catch (e) {
+    msgEl.innerText = '请求异常: ' + e;
+  }
+}
+
+function saveSession() {
+  localStorage.setItem('minischeme_user_session', JSON.stringify({
+    mac: curMac,
+    token: sessionToken,
+    isSim: isSim
+  }));
+}
+
+function showDashboardView() {
+  document.getElementById('login-section').classList.add('hidden');
+  document.getElementById('dashboard-section').classList.remove('hidden');
+  document.getElementById('disp-mac').innerText = curMac;
+  const bEl = document.getElementById('disp-badge');
+  if (isSim) {
+    bEl.className = 'badge badge-sim';
+    bEl.innerText = '🎮 WASM 模拟器 (UUID)';
+  } else {
+    bEl.className = 'badge';
+    bEl.innerText = '📱 物理硬件设备';
   }
 }
 
 async function loadDashboard() {
-  // Load data
-  const rData = await fetch(`/api/user/data?mac=${curMac}&token=${sessionToken}`);
-  const dData = await rData.json();
-  const tbody = document.querySelector('#data-table tbody');
-  tbody.innerHTML = '';
-  if (dData.items && dData.items.length) {
-    dData.items.forEach(it => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td><b>${it.app_id}</b></td><td>${it.key}</td><td><span class="masked">${it.value}</span></td><td>${new Date(it.updated_at*1000).toLocaleString()}</td><td><button style="padding:4px 8px;font-size:12px;background:#ef4444;" onclick="clearApp('${it.app_id}')">清空此应用</button></td>`;
-      tbody.appendChild(tr);
-    });
-  } else {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#94a3b8;">暂无存储数据</td></tr>';
-  }
+  // Load app data
+  try {
+    const rData = await fetch(`/api/user/data?mac=${encodeURIComponent(curMac)}&token=${encodeURIComponent(sessionToken)}`);
+    if (!rData.ok) {
+      doLogout();
+      return;
+    }
+    const dData = await rData.json();
+    if (!dData.success) {
+      doLogout();
+      return;
+    }
+    const tbody = document.querySelector('#data-table tbody');
+    tbody.innerHTML = '';
+    if (dData.items && dData.items.length) {
+      dData.items.forEach(it => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td><b>${it.app_id}</b></td><td>${it.key}</td><td><span class="masked">${it.value}</span></td><td>${new Date(it.updated_at*1000).toLocaleString()}</td><td><button style="padding:4px 8px;font-size:12px;background:#ef4444;" onclick="clearApp('${it.app_id}')">清空此应用</button></td>`;
+        tbody.appendChild(tr);
+      });
+    } else {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#94a3b8;">暂无存储数据</td></tr>';
+    }
 
-  // Load logs
-  const rLogs = await fetch(`/api/user/logs?mac=${curMac}&token=${sessionToken}`);
-  const dLogs = await rLogs.json();
-  const logTbody = document.querySelector('#log-table tbody');
-  logTbody.innerHTML = '';
-  if (dLogs.items && dLogs.items.length) {
-    dLogs.items.forEach(l => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${new Date(l.timestamp*1000).toLocaleString()}</td><td>${l.ip}</td><td>${l.method}</td><td>${l.endpoint}</td><td>${l.status_code}</td><td>${l.bytes_transferred} B</td>`;
-      logTbody.appendChild(tr);
-    });
-  } else {
-    logTbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#94a3b8;">暂无访问记录</td></tr>';
+    // Load logs
+    const rLogs = await fetch(`/api/user/logs?mac=${encodeURIComponent(curMac)}&token=${encodeURIComponent(sessionToken)}`);
+    const dLogs = await rLogs.json();
+    const logTbody = document.querySelector('#log-table tbody');
+    logTbody.innerHTML = '';
+    if (dLogs.items && dLogs.items.length) {
+      dLogs.items.forEach(l => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${new Date(l.timestamp*1000).toLocaleString()}</td><td>${l.ip}</td><td>${l.method}</td><td>${l.endpoint}</td><td>${l.status_code}</td><td>${l.bytes_transferred} B</td>`;
+        logTbody.appendChild(tr);
+      });
+    } else {
+      logTbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#94a3b8;">暂无访问记录</td></tr>';
+    }
+  } catch (e) {
+    console.warn('Dashboard load error:', e);
   }
 }
 
 async function clearApp(appId) {
   if (!confirm(`确认清空应用 ${appId} 的所有数据？`)) return;
-  await fetch(`/api/user/data/clear?mac=${curMac}&app_id=${appId}&token=${sessionToken}`, { method: 'POST' });
+  await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=${encodeURIComponent(appId)}&token=${encodeURIComponent(sessionToken)}`, { method: 'POST' });
+  loadDashboard();
+}
+
+async function clearAllData() {
+  if (!confirm(`确认一键清空该设备 (${curMac}) 的所有应用配置数据？`)) return;
+  await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=all&token=${encodeURIComponent(sessionToken)}`, { method: 'POST' });
   loadDashboard();
 }
 
 async function doDeleteAccount() {
   if (!confirm('警告：此操作将永久注销设备账户并清空所有记录，确认继续？')) return;
-  await fetch(`/api/user/account/delete?mac=${curMac}&token=${sessionToken}`, { method: 'POST' });
+  await fetch(`/api/user/account/delete?mac=${encodeURIComponent(curMac)}&token=${encodeURIComponent(sessionToken)}`, { method: 'POST' });
   alert('账户已注销');
-  location.reload();
+  doLogout();
 }
 
 function doLogout() {
+  localStorage.removeItem('minischeme_user_session');
+  try {
+    fetch('/api/user/logout', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token: sessionToken, mac: curMac })
+    });
+  } catch (e) {}
+  sessionToken = '';
+  curMac = '';
   location.reload();
 }
+
+window.addEventListener('DOMContentLoaded', () => {
+  // Check URL query parameters for ?uuid=...
+  const params = new URLSearchParams(window.location.search);
+  const qUuid = params.get('uuid');
+  if (qUuid) {
+    switchLoginTab('sim');
+    document.getElementById('sim-uuid-input').value = qUuid;
+    doSimLogin(qUuid);
+    return;
+  }
+
+  // Check persistent session in localStorage
+  const saved = localStorage.getItem('minischeme_user_session');
+  if (saved) {
+    try {
+      const sess = JSON.parse(saved);
+      if (sess && sess.mac && sess.token) {
+        curMac = sess.mac;
+        sessionToken = sess.token;
+        isSim = !!sess.isSim;
+        showDashboardView();
+        loadDashboard();
+        return;
+      }
+    } catch (e) {
+      localStorage.removeItem('minischeme_user_session');
+    }
+  }
+});
 </script>
 </body>
 </html>
 """
+
+from .database import normalize_device_id
 
 _active_nonces: Dict[str, Tuple[str, float]] = {}
 _user_sessions: Dict[str, Tuple[str, float]] = {}
 
 
 def generate_user_nonce(mac: str) -> str:
-    clean_mac = mac.replace(":", "").replace("-", "").upper()
+    clean_mac = normalize_device_id(mac)
     nonce = secrets.token_hex(16)
     _active_nonces[clean_mac] = (nonce, time.time() + 60)
     return nonce
 
 
+def create_user_session(mac: str) -> str:
+    clean_mac = normalize_device_id(mac)
+    token = secrets.token_hex(24)
+    # 30-day persistent session until manual logout
+    _user_sessions[token] = (clean_mac, time.time() + 86400 * 30)
+    return token
+
+
 def verify_user_login(mac: str, client_hash: str, nonce: str, db) -> Tuple[bool, str]:
-    clean_mac = mac.replace(":", "").replace("-", "").upper()
+    clean_mac = normalize_device_id(mac)
     if clean_mac not in _active_nonces:
         return False, "挑战已超时，请刷新重试"
     saved_nonce, exp = _active_nonces.pop(clean_mac)
@@ -186,22 +356,39 @@ def verify_user_login(mac: str, client_hash: str, nonce: str, db) -> Tuple[bool,
     if not dev:
         return False, "未找到该设备，请确认设备已首次联网激活"
 
-    # Verify client hash against device's hardware hash key
-    # client_hash was SHA256(pwd + nonce). On server:
-    # We can check HMAC of hw_hash_key with nonce
     expected = hashlib.sha256(dev["hardware_hash_key"] + nonce.encode("ascii")).hexdigest()
     if not secrets.compare_digest(expected, client_hash):
         return False, "硬件密码校验失败"
 
-    token = secrets.token_hex(24)
-    _user_sessions[token] = (clean_mac, time.time() + 3600)
+    token = create_user_session(clean_mac)
+    return True, token
+
+
+def verify_simulator_login(uuid: str, db, ip: str = "") -> Tuple[bool, str]:
+    clean_uuid = normalize_device_id(uuid)
+    if not clean_uuid:
+        return False, "无效的模拟器 UUID"
+    if not clean_uuid.startswith("SIM"):
+        clean_uuid = f"SIM-{clean_uuid}"
+    dev = db.get_device(clean_uuid)
+    if not dev:
+        db.register_simulator(clean_uuid, ip)
+    else:
+        db.update_device_seen(clean_uuid, ip)
+    token = create_user_session(clean_uuid)
     return True, token
 
 
 def check_user_session(token: str, mac: str) -> bool:
-    clean_mac = mac.replace(":", "").replace("-", "").upper()
+    clean_mac = normalize_device_id(mac)
     if token in _user_sessions:
         session_mac, exp = _user_sessions[token]
         if exp > time.time() and session_mac == clean_mac:
             return True
     return False
+
+
+def remove_user_session(token: str):
+    if token in _user_sessions:
+        del _user_sessions[token]
+

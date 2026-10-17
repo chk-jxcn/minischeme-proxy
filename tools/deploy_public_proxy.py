@@ -106,7 +106,7 @@ def deploy():
             f"cfg.read('{CONFIG_PATH}')\n"
             f"if not cfg.has_section('server'): cfg.add_section('server')\n"
             f"if not cfg.has_section('security'): cfg.add_section('security')\n"
-            f"cfg.set('server', 'protocol_mode', 'encrypted')\n"
+            f"cfg.set('server', 'protocol_mode', 'both')\n"
             f"cfg.set('server', 'components', 'proxy,channel,portal')\n"
             f"cfg.set('security', 'admin_login_delay', '5')\n"
             f"if not cfg.get('security', 'admin_password', fallback=''):\n"
@@ -125,7 +125,7 @@ def deploy():
         mk1 = secrets.token_bytes(32).hex()
         cfg_content = (
             "[server]\n"
-            "protocol_mode = encrypted\n"
+            "protocol_mode = both\n"
             "components = proxy,channel,portal\n\n"
             "[security]\n"
             f"admin_password = {new_pwd}\n"
@@ -152,7 +152,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory={REMOTE_DIR}
-ExecStart=/usr/bin/python3 {REMOTE_DIR}/server.py --port {REMOTE_PORT} --proxy-only --protocol encrypted --admin-login-delay 5 --no-tray --config {CONFIG_PATH}
+ExecStart=/usr/bin/python3 {REMOTE_DIR}/server.py --port {REMOTE_PORT} --proxy-only --protocol both --admin-login-delay 5 --no-tray --config {CONFIG_PATH}
 Restart=always
 RestartSec=3
 Environment=PYTHONUNBUFFERED=1
@@ -193,14 +193,15 @@ def test_endpoints():
     # A. Health check
     out = run_ssh(f"curl -s http://127.0.0.1:{REMOTE_PORT}/health")
     data = json.loads(out)
-    assert data.get("protocol_mode") == "encrypted", f"Expected encrypted, got {data.get('protocol_mode')}"
+    assert data.get("protocol_mode") in ("encrypted", "both"), f"Unexpected protocol mode: {data.get('protocol_mode')}"
     assert "webrepl" not in data.get("components", []), "webrepl component must be disabled"
-    print("      [OK] /health returned 200 OK (encrypted mode confirmed)")
+    print(f"      [OK] /health returned 200 OK (mode={data.get('protocol_mode')})")
 
-    # B. Plaintext /app/weather should return 403 Forbidden
+    # B. /app/weather test
     out_weather = run_ssh(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{REMOTE_PORT}/app/weather")
-    assert out_weather.strip() == "403", f"Expected 403, got {out_weather}"
-    print("      [OK] /app/weather returned 403 Forbidden as expected (plaintext prohibited)")
+    expected_code = "200" if data.get("protocol_mode") == "both" else "403"
+    assert out_weather.strip() == expected_code, f"Expected {expected_code}, got {out_weather}"
+    print(f"      [OK] /app/weather returned {expected_code} as expected")
 
     # C. Static WebREPL files should return 404 in proxy-only mode
     out_root = run_ssh(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{REMOTE_PORT}/")

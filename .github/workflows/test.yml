@@ -3,9 +3,13 @@ name: App Proxy & Protocol Converter CI
 on:
   push:
     branches: [ master, main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ master, main ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   test:
@@ -29,3 +33,27 @@ jobs:
     - name: Run Test Suite
       run: |
         python -m pytest -v tests
+
+  release:
+    needs: test
+    if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Package Release Archive
+      run: |
+        zip -r minischeme-proxy.zip server.py app_proxy.py proxy tools requirements.txt config.example.ini pytest.ini README.md
+
+    - name: Publish Release Assets
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }}
+        name: "MiniScheme App Proxy & Protocol Converter (${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v1.0.{0}', github.run_number) }})"
+        make_latest: true
+        files: |
+          minischeme-proxy.zip
+          requirements.txt
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

@@ -13,9 +13,12 @@ preventing latency during page transitions on the hardware device.
 """
 
 import concurrent.futures
+import configparser
 import datetime
+import gzip
 import json
 import math
+import os
 import re
 import time
 import urllib.parse
@@ -270,10 +273,16 @@ def fetch_qweather(loc: str, token: str, host: str, client_ip: str = "") -> Opti
 
     def qw_api_call(path: str, params: dict, timeout: float = 6.0) -> dict:
         q_params = {**params, "lang": "zh", "key": tok}
-        url = f"{base_url}{path}?{urllib.parse.urlencode(q_params)}"
+        cur_base = base_url
+        if path.startswith("/geo/") and ("devapi.qweather.com" in base_url or "api.qweather.com" in base_url):
+            cur_base = "https://geoapi.qweather.com"
+        url = f"{cur_base}{path}?{urllib.parse.urlencode(q_params)}"
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            raw = resp.read()
+            if raw[:2] == b"\x1f\x8b":
+                raw = gzip.decompress(raw)
+            data = json.loads(raw.decode("utf-8", errors="replace"))
             if str(data.get("code", "200")) != "200":
                 raise RuntimeError(f"QWeather error {path}: code {data.get('code')}")
             return data
@@ -553,6 +562,33 @@ def build_fallback_weather(loc: str, fallback_provider: str = "MiniScheme-Proxy"
     return items
 
 
+def get_qweather_default_config():
+    """Reads [qweather] key and host from config.ini or app_proxy.local.ini if available."""
+    cfg = configparser.ConfigParser()
+    cur_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        "app_proxy.local.ini",
+        "config.ini",
+        "/opt/minischeme-proxy/config.ini",
+        os.path.join(cur_dir, "..", "config.ini"),
+        os.path.join(cur_dir, "..", "app_proxy.local.ini"),
+        os.path.join(cur_dir, "..", "..", "tools", "app_proxy.local.ini"),
+        os.path.join(cur_dir, "..", "..", "..", "tools", "app_proxy.local.ini"),
+    ]
+    for p in candidates:
+        if os.path.isfile(p):
+            try:
+                cfg.read(p, encoding="utf-8")
+                if cfg.has_section("qweather"):
+                    k = cfg.get("qweather", "key", fallback="").strip()
+                    h = cfg.get("qweather", "host", fallback="").strip()
+                    if k:
+                        return k, h
+            except Exception:
+                pass
+    return "", ""
+
+
 def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "", client_ip: str = "") -> Dict[str, Any]:
     """Fetches weather forecast for all pages (now, 7-day, 24-hr, rain/air, indices).
 
@@ -561,6 +597,14 @@ def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "
     """
     tok = (token or key or "").strip()
     hst = (host or "").strip()
+
+    if not tok or not hst:
+        def_k, def_h = get_qweather_default_config()
+        if not tok:
+            tok = def_k
+        if not hst:
+            hst = def_h
+
     cache_key = f"weather:{loc}:{tok}:{hst}:{client_ip}" if (not loc or loc.strip().lower() == "auto") else f"weather:{loc}:{tok}:{hst}"
     hit = cache.get(cache_key)
     if hit:
@@ -1464,6 +1508,74 @@ def _rise_set(pos_fn, day_start: datetime.datetime, lat: float, lon: float, hori
     return fmt(rise), fmt(sett)
 
 
+def _moon_rise_set(pos_fn, day_start: datetime.datetime, lat: float, lon: float, horizon: float):
+    """Computes the continuous lunar visibility cycle (moonrise to moonset) for the given day.
+
+    Unlike the solar day (which always resets each 24h), the lunar diurnal period is
+    approximately 24h 50m. A moonrise on day D often sets after midnight (early on day D+1),
+    or a moon already in the sky at 00:00 rose late on day D-1. This function pairs the rise
+    with its true setting event and prefixes with '次日' / '前日' when crossing midnight,
+    guaranteeing a complete and closed rise-set visibility window without missing end times.
+    """
+    rise = None
+    prev = pos_fn(day_start, lat, lon)[0] - horizon
+    for k in range(1, 289):
+        t = day_start + datetime.timedelta(minutes=5 * k)
+        cur = pos_fn(t, lat, lon)[0] - horizon
+        if prev < 0 <= cur:
+            rise = t - datetime.timedelta(minutes=5 * cur / ((cur - prev) or 1))
+            break
+        prev = cur
+
+    if rise is not None:
+        # The moonset corresponding to this rise is the first set AFTER rise
+        sett = None
+        prev = pos_fn(rise, lat, lon)[0] - horizon
+        for k in range(1, 289):
+            t = rise + datetime.timedelta(minutes=5 * k)
+            cur = pos_fn(t, lat, lon)[0] - horizon
+            if prev >= 0 > cur:
+                sett = t - datetime.timedelta(minutes=5 * cur / ((cur - prev) or 1))
+                break
+            prev = cur
+    else:
+        # No moonrise on this civil day (e.g. moon was already up from previous day)
+        # Find when it sets today
+        sett = None
+        prev = pos_fn(day_start, lat, lon)[0] - horizon
+        for k in range(1, 289):
+            t = day_start + datetime.timedelta(minutes=5 * k)
+            cur = pos_fn(t, lat, lon)[0] - horizon
+            if prev >= 0 > cur:
+                sett = t - datetime.timedelta(minutes=5 * cur / ((cur - prev) or 1))
+                break
+            prev = cur
+        # And find when this moon rose (search backward before day_start)
+        cur = pos_fn(day_start, lat, lon)[0] - horizon
+        for k in range(1, 289):
+            t = day_start - datetime.timedelta(minutes=5 * k)
+            prev_b = pos_fn(t, lat, lon)[0] - horizon
+            if prev_b < 0 <= cur:
+                rise = t + datetime.timedelta(minutes=5 * (-prev_b) / ((cur - prev_b) or 1))
+                break
+            cur = prev_b
+
+    def fmt_event(dt):
+        if not dt:
+            return "--"
+        local_dt = dt.astimezone()
+        local_day_start = day_start.astimezone()
+        diff = (local_dt.date() - local_day_start.date()).days
+        hhmm = local_dt.strftime("%H:%M")
+        if diff > 0:
+            return f"次日{hhmm}"
+        elif diff < 0:
+            return f"前日{hhmm}"
+        return hhmm
+
+    return fmt_event(rise), fmt_event(sett)
+
+
 def _next_moon(now: datetime.datetime, target: float):
     prev = _rev(moon_elongation(now) - target)
     for h in range(1, 31 * 24):
@@ -1488,7 +1600,7 @@ def cal_sky(place: Dict[str, Any]) -> List[Dict[str, str]]:
     s_alt, s_az = sun_pos(now, lat, lon)
     m_alt, m_az = moon_pos(now, lat, lon)
     s_rise, s_set = _rise_set(sun_pos, day_start, lat, lon, -0.833)
-    m_rise, m_set = _rise_set(moon_pos, day_start, lat, lon, 0.125)
+    m_rise, m_set = _moon_rise_set(moon_pos, day_start, lat, lon, 0.125)
     return [
         {"t": "moon", "a": phase, "b": str(round(illum * 100)), "c": f"{elong / 360 * 29.53:.1f}",
          "d": str(round(elong)), "e": f"{fmt(nf)},{fmt(nn)}"},

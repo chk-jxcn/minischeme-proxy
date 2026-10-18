@@ -23,3 +23,6 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Market apps cache
+apps/

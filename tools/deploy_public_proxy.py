@@ -122,9 +122,14 @@ def deploy():
             f"cfg.read('{CONFIG_PATH}')\n"
             f"if not cfg.has_section('server'): cfg.add_section('server')\n"
             f"if not cfg.has_section('security'): cfg.add_section('security')\n"
+            f"if not cfg.has_section('qweather'): cfg.add_section('qweather')\n"
             f"cfg.set('server', 'protocol_mode', 'both')\n"
             f"cfg.set('server', 'components', 'proxy,channel,portal')\n"
             f"cfg.set('security', 'admin_login_delay', '5')\n"
+            f"if not cfg.get('qweather', 'key', fallback=''):\n"
+            f"    cfg.set('qweather', 'key', 'f303e9850b6a4a368d7d76f9d27589e3')\n"
+            f"if not cfg.get('qweather', 'host', fallback=''):\n"
+            f"    cfg.set('qweather', 'host', 'nb7jpkge2v.re.qweatherapi.com')\n"
             f"if not cfg.get('security', 'admin_password', fallback=''):\n"
             f"    import secrets, string\n"
             f"    cfg.set('security', 'admin_password', ''.join(secrets.choice(string.ascii_letters) for _ in range(10)))\n"
@@ -146,7 +151,10 @@ def deploy():
             "[security]\n"
             f"admin_password = {new_pwd}\n"
             "admin_login_delay = 5\n"
-            f"master_key_1 = {mk1}\n"
+            f"master_key_1 = {mk1}\n\n"
+            "[qweather]\n"
+            "key = f303e9850b6a4a368d7d76f9d27589e3\n"
+            "host = nb7jpkge2v.re.qweatherapi.com\n"
         )
         run_ssh(f"cat << 'EOF' > '{CONFIG_PATH}'\n{cfg_content}\nEOF\nchmod 600 '{CONFIG_PATH}'")
         print(f"      [OK] config.ini written to {CONFIG_PATH} (chmod 600)")

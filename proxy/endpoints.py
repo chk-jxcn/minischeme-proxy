@@ -70,8 +70,25 @@ CITY_COORDS = {
 }
 
 
-def locate_place(loc: str = "auto") -> Dict[str, Any]:
-    """Resolves location name and coordinates from query parameter or IP."""
+def is_private_ip(ip: str) -> bool:
+    if not ip:
+        return True
+    ip = ip.strip()
+    if ip in ("127.0.0.1", "localhost", "::1", "0.0.0.0", ""):
+        return True
+    if ip.startswith(("10.", "192.168.", "127.", "169.254.")):
+        return True
+    if ip.startswith("172."):
+        parts = ip.split(".")
+        if len(parts) >= 2 and parts[1].isdigit():
+            v = int(parts[1])
+            if 16 <= v <= 31:
+                return True
+    return False
+
+
+def locate_place(loc: str = "auto", client_ip: str = "") -> Dict[str, Any]:
+    """Resolves location name and coordinates from query parameter or client IP."""
     loc_clean = (loc or "auto").strip()
     m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$", loc_clean)
     if m:
@@ -100,38 +117,98 @@ def locate_place(loc: str = "auto") -> Dict[str, Any]:
             pass
         return {"name": clean_name, "lat": 39.9042, "lon": 116.4074}
 
-    # IP Geolocation with TTL cache
-    hit = cache.get("ip_geo_place")
+    # IP Geolocation: determine effective public IP to locate
+    target_ip = (client_ip or "").strip()
+    if is_private_ip(target_ip):
+        # Local or loopback request: probe public egress IP
+        try:
+            req = urllib.request.Request("http://myip.ipip.net/", headers={"User-Agent": "MiniScheme-Proxy/1.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                text = resp.read().decode("utf-8", "replace")
+                m_ip = re.search(r"(\d+\.\d+\.\d+\.\d+)", text)
+                if m_ip:
+                    target_ip = m_ip.group(1)
+        except Exception:
+            pass
+
+    cache_key = f"ip_geo_{target_ip}" if target_ip and not is_private_ip(target_ip) else "ip_geo_default"
+    hit = cache.get(cache_key)
     if hit:
         return hit
 
     resolved = None
-    try:
-        req = urllib.request.Request("http://myip.ipip.net/", headers={"User-Agent": "MiniScheme-Proxy/1.0"})
-        with urllib.request.urlopen(req, timeout=4.0) as resp:
-            text = resp.read().decode("utf-8", "replace")
-            parts = text.split("来自于：")[-1].split()
-            province = parts[1] if len(parts) > 1 else ""
-            places = [p for p in parts[2:] if p not in ("电信", "联通", "移动", "铁通", "广电", "教育网")]
-            target_name = places[0] if places else (province or "北京")
-            clean_name = target_name.rstrip("市县区")
-            if clean_name in CITY_COORDS:
-                lat, lon = CITY_COORDS[clean_name]
-                resolved = {"name": clean_name, "lat": lat, "lon": lon}
-            elif target_name in CITY_COORDS:
-                lat, lon = CITY_COORDS[target_name]
-                resolved = {"name": clean_name, "lat": lat, "lon": lon}
-            else:
-                cap = CAPITALS.get(province.rstrip("省市自治区"), "北京")
-                lat, lon = CITY_COORDS.get(cap, (39.9042, 116.4074))
-                resolved = {"name": clean_name, "lat": lat, "lon": lon}
-    except Exception:
-        pass
+
+    # Step 1: Query Baidu OpenData IP API (high-precision county and city resolution)
+    if target_ip and not is_private_ip(target_ip):
+        try:
+            b_url = f"http://opendata.baidu.com/api.php?query={target_ip}&co=&resource_id=6006&oe=utf8"
+            req = urllib.request.Request(b_url, headers={"User-Agent": "MiniScheme-Proxy/1.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                b_data = json.loads(resp.read().decode("utf-8"))
+                if b_data.get("data"):
+                    raw_loc = b_data["data"][0].get("location", "")
+                    clean_loc = re.sub(r"\s*(电信|联通|移动|铁通|广电|教育网).*$", "", raw_loc).strip()
+                    for city_key in sorted(CITY_COORDS.keys(), key=lambda c: len(c), reverse=True):
+                        if city_key in clean_loc:
+                            lat, lon = CITY_COORDS[city_key]
+                            resolved = {"name": city_key, "lat": lat, "lon": lon}
+                            break
+                    if not resolved and clean_loc:
+                        sub_parts = re.split(r"[省市区县旗]", clean_loc)
+                        sub_parts = [p.strip() for p in sub_parts if p.strip()]
+                        cand = sub_parts[-1] if sub_parts else clean_loc
+                        resolved = {"name": cand, "lat": 39.9042, "lon": 116.4074}
+        except Exception:
+            pass
+
+    # Step 2: Query PCOnline Whois
+    if not resolved and target_ip and not is_private_ip(target_ip):
+        try:
+            p_url = f"https://whois.pconline.com.cn/ipJson.jsp?ip={target_ip}&json=true"
+            req = urllib.request.Request(p_url, headers={"User-Agent": "MiniScheme-Proxy/1.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                p_data = json.loads(resp.read().decode("gbk", "replace").strip())
+                city = (p_data.get("city") or "").rstrip("市县区")
+                pro = (p_data.get("pro") or "").rstrip("省市自治区")
+                cand = city or pro
+                if cand in CITY_COORDS:
+                    lat, lon = CITY_COORDS[cand]
+                    resolved = {"name": cand, "lat": lat, "lon": lon}
+                elif cand:
+                    cap = CAPITALS.get(pro, "北京")
+                    lat, lon = CITY_COORDS.get(cap, (39.9042, 116.4074))
+                    resolved = {"name": cand, "lat": lat, "lon": lon}
+        except Exception:
+            pass
+
+    # Step 3: Query myip.ipip.net
+    if not resolved:
+        try:
+            req = urllib.request.Request("http://myip.ipip.net/", headers={"User-Agent": "MiniScheme-Proxy/1.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                text = resp.read().decode("utf-8", "replace")
+                parts = text.split("来自于：")[-1].split()
+                province = parts[1] if len(parts) > 1 else ""
+                places = [p for p in parts[2:] if p not in ("电信", "联通", "移动", "铁通", "广电", "教育网")]
+                target_name = places[0] if places else (province or "北京")
+                clean_name = target_name.rstrip("市县区")
+                if clean_name in CITY_COORDS:
+                    lat, lon = CITY_COORDS[clean_name]
+                    resolved = {"name": clean_name, "lat": lat, "lon": lon}
+                elif target_name in CITY_COORDS:
+                    lat, lon = CITY_COORDS[target_name]
+                    resolved = {"name": clean_name, "lat": lat, "lon": lon}
+                else:
+                    cap = CAPITALS.get(province.rstrip("省市自治区"), "北京")
+                    lat, lon = CITY_COORDS.get(cap, (39.9042, 116.4074))
+                    resolved = {"name": clean_name, "lat": lat, "lon": lon}
+        except Exception:
+            pass
 
     if not resolved:
         resolved = {"name": "北京", "lat": 39.9042, "lon": 116.4074}
 
-    cache.set("ip_geo_place", resolved, ttl_seconds=6 * 3600)
+    cache.set(cache_key, resolved, ttl_seconds=6 * 3600)
     return resolved
 
 
@@ -176,7 +253,7 @@ def series(values: List[float], scale: int = 1) -> str:
     return ",".join(str(int(round((v or 0) * scale))) for v in values)
 
 
-def fetch_qweather(loc: str, token: str, host: str) -> Optional[List[Dict[str, Any]]]:
+def fetch_qweather(loc: str, token: str, host: str, client_ip: str = "") -> Optional[List[Dict[str, Any]]]:
     """Fetches live weather from QWeather using per-device token without persistence."""
     tok = token.strip()
     if not tok:
@@ -202,7 +279,7 @@ def fetch_qweather(loc: str, token: str, host: str) -> Optional[List[Dict[str, A
             return data
 
     try:
-        loc_str = locate_place(loc)["name"] if (not loc or loc.strip().lower() == "auto") else loc.strip()
+        loc_str = locate_place(loc, client_ip=client_ip)["name"] if (not loc or loc.strip().lower() == "auto") else loc.strip()
         geo = qw_api_call("/geo/v2/city/lookup", {"location": loc_str, "number": 1})
         locations = geo.get("location") or []
         if not locations:
@@ -385,9 +462,9 @@ def fetch_qweather(loc: str, token: str, host: str) -> Optional[List[Dict[str, A
         return None
 
 
-def build_fallback_weather(loc: str, fallback_provider: str = "MiniScheme-Proxy") -> List[Dict[str, Any]]:
+def build_fallback_weather(loc: str, fallback_provider: str = "MiniScheme-Proxy", client_ip: str = "") -> List[Dict[str, Any]]:
     """Builds robust fallback weather data conforming to weather.scm schema."""
-    city_name = locate_place(loc)["name"] if (not loc or loc.strip().lower() == "auto") else loc.strip()
+    city_name = locate_place(loc, client_ip=client_ip)["name"] if (not loc or loc.strip().lower() == "auto") else loc.strip()
     now_struct = time.localtime()
     now_hhmm = time.strftime("%H:%M", now_struct)
 
@@ -476,15 +553,15 @@ def build_fallback_weather(loc: str, fallback_provider: str = "MiniScheme-Proxy"
     return items
 
 
-def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "") -> Dict[str, Any]:
+def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "", client_ip: str = "") -> Dict[str, Any]:
     """Fetches weather forecast for all pages (now, 7-day, 24-hr, rain/air, indices).
 
     Supports individual device token (passed via token or key parameter) without proxy-side persistence.
-    Cached in RAM for 10 minutes (600 seconds) per (loc, token, host) tuple.
+    Cached in RAM for 10 minutes (600 seconds) per (loc, token, host, client_ip) tuple.
     """
     tok = (token or key or "").strip()
     hst = (host or "").strip()
-    cache_key = f"weather:{loc}:{tok}:{hst}"
+    cache_key = f"weather:{loc}:{tok}:{hst}:{client_ip}" if (not loc or loc.strip().lower() == "auto") else f"weather:{loc}:{tok}:{hst}"
     hit = cache.get(cache_key)
     if hit:
         return hit
@@ -492,12 +569,12 @@ def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "
     items = None
     is_demo = False
     if tok:
-        items = fetch_qweather(loc, tok, hst)
+        items = fetch_qweather(loc, tok, hst, client_ip=client_ip)
 
     if not items:
         is_demo = True
         provider = "MiniScheme-Proxy" if not tok else "和风天气(回退)"
-        items = build_fallback_weather(loc, provider)
+        items = build_fallback_weather(loc, provider, client_ip=client_ip)
 
     title = "天气【演示数据】" if is_demo else "天气"
     data = {"title": title, "is_demo": is_demo, "items": items}
@@ -1422,7 +1499,7 @@ def cal_sky(place: Dict[str, Any]) -> List[Dict[str, str]]:
     ]
 
 
-def get_calendar(view: str = "today", cd: str = "", wc: str = "", loc: str = "auto") -> Dict[str, Any]:
+def get_calendar(view: str = "today", cd: str = "", wc: str = "", loc: str = "auto", client_ip: str = "") -> Dict[str, Any]:
     """Provides calendar almanac, monthly grid, and sky phase data."""
     import calendar as pycal
     now_struct = time.localtime()
@@ -1447,7 +1524,7 @@ def get_calendar(view: str = "today", cd: str = "", wc: str = "", loc: str = "au
         return {"items": items}
 
     if view == "sky":
-        place = locate_place(loc)
+        place = locate_place(loc, client_ip=client_ip)
         return {"items": cal_sky(place)}
 
     items = [
@@ -1481,7 +1558,7 @@ def get_usage() -> Dict[str, Any]:
     }
 
 
-def handle_app_query(path_with_query: str):
+def handle_app_query(path_with_query: str, client_ip: str = ""):
     """Unified dispatcher for /app/* and /fetch requests."""
     import urllib.parse
     import json as _json
@@ -1494,7 +1571,8 @@ def handle_app_query(path_with_query: str):
             loc=qs.get("loc", ["auto"])[0],
             key=qs.get("key", [""])[0],
             host=qs.get("host", [""])[0],
-            token=qs.get("token", [""])[0]
+            token=qs.get("token", [""])[0],
+            client_ip=client_ip
         )
     elif path == "/app/news":
         data = get_news(qs.get("cat", ["all"])[0], int(qs.get("n", ["8"])[0]))
@@ -1522,7 +1600,8 @@ def handle_app_query(path_with_query: str):
             qs.get("view", ["today"])[0],
             qs.get("cd", [""])[0],
             qs.get("wc", [""])[0],
-            qs.get("loc", ["auto"])[0]
+            qs.get("loc", ["auto"])[0],
+            client_ip=client_ip
         )
     elif path == "/app/usage":
         data = get_usage()

@@ -65,7 +65,7 @@ def derive_request_keys(master_key_2: bytes, nonce: bytes) -> Tuple[bytes, bytes
     okm = hkdf_sha256(
         ikm=master_key_2,
         salt=nonce,
-        info=b"msc1_subkeys",
+        info=b"msc1 request keys",
         length=64
     )
     return okm[:32], okm[32:]
@@ -99,3 +99,19 @@ def aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext_and_tag: bytes, associa
     aesgcm = AESGCM(key)
     gcm_nonce = nonce[:12] if len(nonce) >= 12 else nonce.ljust(12, b"\x00")
     return aesgcm.decrypt(gcm_nonce, ciphertext_and_tag, associated_data)
+
+
+def pack_channel_response(k_resp: bytes, status: int, body: bytes) -> bytes:
+    """Pack response into MSC1 chunked AES-GCM records (max 1024B per record) matching minischeme_channel.c."""
+    stream = struct.pack(">HI", status, len(body)) + body
+    out = bytearray()
+    seq = 0
+    for off in range(0, len(stream), 1024):
+        chunk = stream[off : off + 1024]
+        last = 1 if off + len(chunk) >= len(stream) else 0
+        hdr = struct.pack(">HB", len(chunk), last)
+        nonce = b"\x00\x00\x00\x00" + struct.pack(">Q", seq)
+        out += hdr + aes_gcm_encrypt(k_resp, nonce, chunk, hdr)
+        seq += 1
+    return bytes(out)
+

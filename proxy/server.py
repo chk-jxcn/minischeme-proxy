@@ -12,15 +12,17 @@ import urllib.parse
 from typing import Optional, Tuple
 
 from .crypto import (
+    derive_hardware_hash_key,
     derive_master_key_2,
     derive_request_keys,
     verify_challenge_response,
     aes_gcm_encrypt,
     aes_gcm_decrypt,
+    pack_channel_response,
     HAS_CRYPTOGRAPHY
 )
 from .database import Database
-from .endpoints import get_weather, get_stocks, get_crypto, get_news, get_futures
+from .endpoints import get_weather, get_stocks, get_crypto, get_news, get_futures, handle_app_query
 from .user_portal import (
     USER_HTML,
     generate_user_nonce,
@@ -71,9 +73,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range")
+        self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, X-MiniScheme-Auth")
         self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Access-Control-Max-Age", "86400")
         self.end_headers()
 
     def do_GET(self):
@@ -156,45 +160,75 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             items = self.server_ctx.db.get_app_data(mac, masked=False)  # Admin gets plaintext
             return self._send_json({"success": True, "items": items})
 
-        # Plain app endpoints (dedicated per-app interfaces)
-        if path.startswith("/app/"):
+        # Plain app & market endpoints (/app/*, /market/*, /fetch)
+        if path.startswith("/app/") or path.startswith("/market/") or path == "/fetch":
             if getattr(self.server_ctx, "protocol_mode", "both") == "encrypted":
                 return self._send_json({
                     "success": False,
                     "error": "Plaintext protocol is disabled on this server. Encrypted channel protocol (MSC1) is required."
                 }, 403)
+            status, ctype, body = self._dispatch_proxy_url(self.path)
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
-        if path == "/app/weather":
-            loc = qs.get("loc", ["auto"])[0]
-            token = qs.get("token", [""])[0]
-            key = qs.get("key", [""])[0]
-            host = qs.get("host", [""])[0]
-            return self._send_json(get_weather(loc, key, host, token))
-        if path == "/app/stocks":
-            view = qs.get("view", ["all"])[0]
-            codes = qs.get("codes", ["sh600519,sz300750,sz000858"])[0]
-            index = qs.get("index", ["sh000001"])[0]
-            return self._send_json(get_stocks(view, codes, index))
-        if path == "/app/crypto":
-            view = qs.get("view", ["all"])[0]
-            symbols = qs.get("symbols", ["BTC,ETH,SOL"])[0]
-            chart = qs.get("chart", [""])[0]
-            fiat = qs.get("fiat", ["usd"])[0]
-            return self._send_json(get_crypto(view, symbols, chart, fiat))
-        if path == "/app/futures":
-            view = qs.get("view", ["all"])[0]
-            codes = qs.get("codes", ["RB0,AU0,CU0"])[0]
-            chart = qs.get("chart", [""])[0]
-            return self._send_json(get_futures(view, codes, chart))
-        if path == "/app/news":
-            cat = qs.get("cat", ["all"])[0]
-            n = int(qs.get("n", ["8"])[0])
-            return self._send_json(get_news(cat, n))
+    def _get_client_ip(self) -> str:
+        xff = self.headers.get("X-Forwarded-For")
+        if xff:
+            ip = xff.split(",")[0].strip()
+            if ip:
+                return ip
+        x_real = self.headers.get("X-Real-IP")
+        if x_real:
+            ip = x_real.strip()
+            if ip:
+                return ip
+        if hasattr(self, "client_address") and self.client_address:
+            return str(self.client_address[0]).strip()
+        return ""
 
-        if path == "/app/ping":
-            return self._send_json({"items": [{"t": "ok", "time": int(time.time())}]})
-
-        self._send_json({"error": "not found"}, 404)
+    def _dispatch_proxy_url(self, path_with_query: str, client_ip: str = "") -> Tuple[int, str, bytes]:
+        if not client_ip:
+            client_ip = self._get_client_ip()
+        parsed = urllib.parse.urlparse(path_with_query)
+        path = parsed.path
+        if path.startswith("/market/"):
+            rel = path[len("/market/"):].lstrip("/")
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            for cand_dir in (os.path.join(base_dir, "apps"), os.path.join(base_dir, "dist")):
+                cand = os.path.join(cand_dir, rel)
+                if os.path.isfile(cand):
+                    ctype = "application/json" if rel.endswith(".json") else "application/octet-stream"
+                    with open(cand, "rb") as f:
+                        return 200, ctype, f.read()
+            return 404, "application/json", b'{"error":"market file not found"}'
+        if path == "/fetch":
+            qs = urllib.parse.parse_qs(parsed.query)
+            target_url = (qs.get("url") or [""])[0]
+            if not target_url.startswith(("http://", "https://")):
+                return 400, "text/plain", b"missing or invalid url"
+            p_target = urllib.parse.urlparse(target_url)
+            if p_target.path.startswith("/app/") or p_target.path == "/health":
+                sub_url = p_target.path + ("?" + p_target.query if p_target.query else "")
+                return handle_app_query(sub_url, client_ip=client_ip)
+            try:
+                import urllib.request as _ureq
+                hdrs = {"User-Agent": "MiniScheme-Proxy/1.0"}
+                if client_ip:
+                    hdrs["X-Forwarded-For"] = client_ip
+                req = _ureq.Request(target_url, headers=hdrs)
+                with _ureq.urlopen(req, timeout=5) as resp:
+                    body = resp.read(512 * 1024)
+                    ctype = resp.headers.get("Content-Type", "application/json")
+                    return 200, ctype, body
+            except Exception as e:
+                return 502, "text/plain", f"fetch error: {e}".encode("utf-8")
+        return handle_app_query(path_with_query, client_ip=client_ip)
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -527,14 +561,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Decrypt
         aad = raw[:5 + id_len + 20]
         try:
-            plaintext = aes_gcm_decrypt(k_req, nonce, ciphertext_and_tag, aad)
+            plaintext = aes_gcm_decrypt(k_req, bytes(12), ciphertext_and_tag, aad)
         except Exception:
-            return self._send_json({"error": "authentication tag failed"}, 403)
+            try:
+                plaintext = aes_gcm_decrypt(k_req, nonce, ciphertext_and_tag, aad)
+            except Exception:
+                return self._send_json({"error": "authentication tag failed"}, 403)
 
         # Plaintext format: u32 timestamp | u8 method_len | method | u16 url_len | url | body
         ts = struct.unpack(">I", plaintext[:4])[0]
         now = int(time.time())
-        if abs(now - ts) > CHANNEL_SKEW_SECONDS:
+        if ts != 0 and abs(now - ts) > CHANNEL_SKEW_SECONDS:
             return self._send_json({"error": f"timestamp skewed by {ts - now}s"}, 403)
 
         m_len = plaintext[4]
@@ -543,50 +580,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         url = plaintext[7 + m_len:7 + m_len + u_len].decode("utf-8", "replace")
         body = plaintext[7 + m_len + u_len:]
 
-        # Step 5: Route request to separate app endpoints
-        resp_status = 200
-        parsed_url = urllib.parse.urlparse(url)
-        path = parsed_url.path
-        qs = urllib.parse.parse_qs(parsed_url.query)
+        # Step 5: Route request to unified app & market dispatcher
+        resp_status, _, resp_body = self._dispatch_proxy_url(url)
 
-        if path == "/app/weather":
-            loc = qs.get("loc", ["auto"])[0]
-            token = qs.get("token", [""])[0]
-            key = qs.get("key", [""])[0]
-            host = qs.get("host", [""])[0]
-            resp_body = json.dumps(get_weather(loc, key, host, token)).encode("utf-8")
-        elif path == "/app/stocks":
-            view = qs.get("view", ["all"])[0]
-            codes = qs.get("codes", ["sh600519,sz300750,sz000858"])[0]
-            index = qs.get("index", ["sh000001"])[0]
-            resp_body = json.dumps(get_stocks(view, codes, index)).encode("utf-8")
-        elif path == "/app/crypto":
-            view = qs.get("view", ["all"])[0]
-            symbols = qs.get("symbols", ["BTC,ETH,SOL"])[0]
-            chart = qs.get("chart", [""])[0]
-            fiat = qs.get("fiat", ["usd"])[0]
-            resp_body = json.dumps(get_crypto(view, symbols, chart, fiat)).encode("utf-8")
-        elif path == "/app/futures":
-            view = qs.get("view", ["all"])[0]
-            codes = qs.get("codes", ["RB0,AU0,CU0"])[0]
-            chart = qs.get("chart", [""])[0]
-            resp_body = json.dumps(get_futures(view, codes, chart)).encode("utf-8")
-        elif path == "/app/news":
-            cat = qs.get("cat", ["all"])[0]
-            n = int(qs.get("n", ["8"])[0])
-            resp_body = json.dumps(get_news(cat, n)).encode("utf-8")
-        elif path == "/app/ping":
-            resp_body = json.dumps({"items": [{"t": "ok", "time": now}]}).encode("utf-8")
-        else:
-            resp_body = json.dumps({"items": [{"t": "ok"}]}).encode("utf-8")
-
-        # Encrypt response
-        resp_nonce = secrets.token_bytes(16)
-        resp_header = struct.pack(">HI", resp_status, len(resp_body))
-        sealed_resp = aes_gcm_encrypt(k_resp, resp_nonce, resp_header + resp_body, resp_nonce)
-
-        out = resp_nonce + sealed_resp
-        client_ip = self.client_address[0]
+        # Encrypt response using MSC1 chunked records
+        out = pack_channel_response(k_resp, resp_status, resp_body)
+        client_ip = self._get_client_ip()
         self.server_ctx.db.update_device_seen(mac, client_ip)
         self.server_ctx.db.log_access(mac, client_ip, method, url, resp_status, len(raw))
 

@@ -58,7 +58,7 @@ def generate_10_letter_password():
 
 
 def create_payload_archive():
-    """Creates an in-memory tar.gz archive of server.py and proxy/ package."""
+    """Creates an in-memory tar.gz archive of server.py, proxy/ package, and apps/ market bundle."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         # Add server.py
@@ -75,6 +75,22 @@ def create_payload_archive():
                     full_p = os.path.join(root, f)
                     rel_p = os.path.relpath(full_p, BASE_DIR).replace("\\", "/")
                     tar.add(full_p, arcname=rel_p)
+
+        # Add apps directory (index.json and compiled .msbc / .allinone.scm for /market/*)
+        apps_dir = os.path.join(BASE_DIR, "apps")
+        if os.path.isdir(apps_dir):
+            for f in os.listdir(apps_dir):
+                full_p = os.path.join(apps_dir, f)
+                if os.path.isfile(full_p) and (f == "index.json" or f.endswith((".msbc", ".allinone.scm"))):
+                    tar.add(full_p, arcname=f"apps/{f}")
+
+        # Add firmware directory (bootloader.bin, partition-table.bin, minischeme_esp32.bin, firmware-manifest.json)
+        firmware_dir = os.path.join(BASE_DIR, "firmware")
+        if os.path.isdir(firmware_dir):
+            for f in os.listdir(firmware_dir):
+                full_p = os.path.join(firmware_dir, f)
+                if os.path.isfile(full_p):
+                    tar.add(full_p, arcname=f"firmware/{f}")
     return buf.getvalue()
 
 
@@ -202,6 +218,13 @@ def test_endpoints():
     expected_code = "200" if data.get("protocol_mode") == "both" else "403"
     assert out_weather.strip() == expected_code, f"Expected {expected_code}, got {out_weather}"
     print(f"      [OK] /app/weather returned {expected_code} as expected")
+
+    # B2. /market/index.json test
+    if data.get("protocol_mode") == "both":
+        out_mkt = run_ssh(f"curl -s http://127.0.0.1:{REMOTE_PORT}/market/index.json")
+        mkt_list = json.loads(out_mkt)
+        assert isinstance(mkt_list, list) and len(mkt_list) >= 13, f"Unexpected /market/index.json: {len(mkt_list)}"
+        print(f"      [OK] /market/index.json returned 200 OK ({len(mkt_list)} apps)")
 
     # C. Static WebREPL files should return 404 in proxy-only mode
     out_root = run_ssh(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{REMOTE_PORT}/")

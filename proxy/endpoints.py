@@ -15,6 +15,7 @@ preventing latency during page transitions on the hardware device.
 import concurrent.futures
 import datetime
 import json
+import math
 import re
 import time
 import urllib.parse
@@ -25,6 +26,113 @@ from .cache import TTLCache
 cache = TTLCache()
 
 WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"]
+
+CAPITALS = {
+    "北京": "北京", "天津": "天津", "上海": "上海", "重庆": "重庆", "河北": "石家庄", "山西": "太原",
+    "辽宁": "沈阳", "吉林": "长春", "黑龙江": "哈尔滨", "江苏": "南京", "浙江": "杭州", "安徽": "合肥",
+    "福建": "福州", "江西": "南昌", "山东": "济南", "河南": "郑州", "湖北": "武汉", "湖南": "长沙",
+    "广东": "广州", "海南": "海口", "四川": "成都", "贵州": "贵阳", "云南": "昆明", "陕西": "西安",
+    "甘肃": "兰州", "青海": "西宁", "台湾": "台北", "内蒙古": "呼和浩特", "广西": "南宁", "西藏": "拉萨",
+    "宁夏": "银川", "新疆": "乌鲁木齐", "香港": "香港", "澳门": "澳门",
+}
+
+CITY_COORDS = {
+    # Municipalities & Special Administrative Regions
+    "北京": (39.9042, 116.4074), "天津": (39.0842, 117.2009), "上海": (31.2304, 121.4737),
+    "重庆": (29.5630, 106.5516), "香港": (22.3193, 114.1694), "澳门": (22.1987, 113.5439),
+    "台北": (25.0330, 121.5654),
+    # Provincial capitals & major cities
+    "石家庄": (38.0428, 114.5149), "太原": (37.8706, 112.5489), "沈阳": (41.8057, 123.4315),
+    "长春": (43.8171, 125.3235), "哈尔滨": (45.8038, 126.5349), "南京": (32.0603, 118.7969),
+    "杭州": (30.2741, 120.1551), "合肥": (31.8206, 117.2272), "福州": (26.0745, 119.2965),
+    "南昌": (28.6829, 115.8582), "济南": (36.6512, 117.1201), "郑州": (34.7466, 113.6253),
+    "武汉": (30.5928, 114.3055), "长沙": (28.2282, 112.9388), "广州": (23.1291, 113.2644),
+    "南宁": (22.8170, 108.3665), "海口": (20.0440, 110.1999), "成都": (30.5728, 104.0668),
+    "贵阳": (26.6470, 106.6302), "昆明": (25.0406, 102.7123), "西安": (34.3416, 108.9398),
+    "兰州": (36.0611, 103.8343), "西宁": (36.6171, 101.7782), "银川": (38.4872, 106.2309),
+    "乌鲁木齐": (43.8256, 87.6168), "呼和浩特": (40.8427, 111.7492), "拉萨": (29.6525, 91.1721),
+    # Additional tier-1 & tier-2 & notable cities / counties
+    "深圳": (22.5431, 114.0579), "青岛": (36.0671, 120.3826), "大连": (38.9140, 121.6147),
+    "厦门": (24.4798, 118.0894), "宁波": (29.8683, 121.5440), "苏州": (31.2990, 120.5853),
+    "无锡": (31.4912, 120.3119), "常州": (31.8112, 119.9741), "温州": (27.9943, 120.6994),
+    "东莞": (23.0205, 113.7518), "佛山": (23.0215, 113.1214), "珠海": (22.2707, 113.5767),
+    "中山": (22.5176, 113.3928), "烟台": (37.4638, 121.4479), "潍坊": (36.7068, 119.1618),
+    "泉州": (24.8741, 118.6757), "桂林": (25.2736, 110.2902), "洛阳": (34.6197, 112.4540),
+    "芜湖": (31.3529, 118.3765), "宜昌": (30.6920, 111.2865), "襄阳": (32.0084, 112.1224),
+    "岳阳": (29.3566, 113.1289), "绵阳": (31.4675, 104.6791), "遵义": (27.7257, 106.9274),
+    "曲靖": (25.4900, 103.7962), "宝鸡": (34.3693, 107.2375), "汉中": (33.0677, 107.0286),
+    "三亚": (18.2528, 109.5119), "澄迈": (19.7424, 110.0076), "儋州": (19.5209, 109.5768),
+    "文昌": (19.6104, 110.7539), "琼海": (19.2458, 110.4665), "万宁": (18.7962, 110.3888),
+    "东方": (19.1019, 108.6538), "五指山": (18.7760, 109.5167), "乐东": (18.7476, 109.1754),
+    "陵水": (18.5050, 110.0372), "保亭": (18.6364, 109.7025), "琼中": (19.0347, 109.8385),
+    "白沙": (19.2246, 109.4526), "昌江": (19.2610, 109.0533), "临高": (19.9083, 109.6877),
+    "定安": (19.6811, 110.3492), "屯昌": (19.3629, 110.1028),
+}
+
+
+def locate_place(loc: str = "auto") -> Dict[str, Any]:
+    """Resolves location name and coordinates from query parameter or IP."""
+    loc_clean = (loc or "auto").strip()
+    m = re.match(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$", loc_clean)
+    if m:
+        return {"name": loc_clean, "lon": float(m.group(1)), "lat": float(m.group(2))}
+
+    if loc_clean.lower() != "auto" and loc_clean != "":
+        clean_name = loc_clean.rstrip("市县区")
+        if clean_name in CITY_COORDS:
+            lat, lon = CITY_COORDS[clean_name]
+            return {"name": clean_name, "lat": lat, "lon": lon}
+        if loc_clean in CITY_COORDS:
+            lat, lon = CITY_COORDS[loc_clean]
+            return {"name": clean_name, "lat": lat, "lon": lon}
+        # Try Open-Meteo geocoding
+        try:
+            url = ("https://geocoding-api.open-meteo.com/v1/search?count=5&language=zh&name=" +
+                   urllib.parse.quote(loc_clean))
+            req = urllib.request.Request(url, headers={"User-Agent": "MiniScheme-Proxy/1.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                results = data.get("results") or []
+                if results:
+                    r0 = results[0]
+                    return {"name": r0.get("name") or clean_name, "lat": float(r0["latitude"]), "lon": float(r0["longitude"])}
+        except Exception:
+            pass
+        return {"name": clean_name, "lat": 39.9042, "lon": 116.4074}
+
+    # IP Geolocation with TTL cache
+    hit = cache.get("ip_geo_place")
+    if hit:
+        return hit
+
+    resolved = None
+    try:
+        req = urllib.request.Request("http://myip.ipip.net/", headers={"User-Agent": "MiniScheme-Proxy/1.0"})
+        with urllib.request.urlopen(req, timeout=4.0) as resp:
+            text = resp.read().decode("utf-8", "replace")
+            parts = text.split("来自于：")[-1].split()
+            province = parts[1] if len(parts) > 1 else ""
+            places = [p for p in parts[2:] if p not in ("电信", "联通", "移动", "铁通", "广电", "教育网")]
+            target_name = places[0] if places else (province or "北京")
+            clean_name = target_name.rstrip("市县区")
+            if clean_name in CITY_COORDS:
+                lat, lon = CITY_COORDS[clean_name]
+                resolved = {"name": clean_name, "lat": lat, "lon": lon}
+            elif target_name in CITY_COORDS:
+                lat, lon = CITY_COORDS[target_name]
+                resolved = {"name": clean_name, "lat": lat, "lon": lon}
+            else:
+                cap = CAPITALS.get(province.rstrip("省市自治区"), "北京")
+                lat, lon = CITY_COORDS.get(cap, (39.9042, 116.4074))
+                resolved = {"name": clean_name, "lat": lat, "lon": lon}
+    except Exception:
+        pass
+
+    if not resolved:
+        resolved = {"name": "北京", "lat": 39.9042, "lon": 116.4074}
+
+    cache.set("ip_geo_place", resolved, ttl_seconds=6 * 3600)
+    return resolved
 
 
 def qw_icon(code: Any) -> str:
@@ -94,7 +202,7 @@ def fetch_qweather(loc: str, token: str, host: str) -> Optional[List[Dict[str, A
             return data
 
     try:
-        loc_str = "北京" if (not loc or loc.strip().lower() == "auto") else loc.strip()
+        loc_str = locate_place(loc)["name"] if (not loc or loc.strip().lower() == "auto") else loc.strip()
         geo = qw_api_call("/geo/v2/city/lookup", {"location": loc_str, "number": 1})
         locations = geo.get("location") or []
         if not locations:
@@ -279,7 +387,7 @@ def fetch_qweather(loc: str, token: str, host: str) -> Optional[List[Dict[str, A
 
 def build_fallback_weather(loc: str, fallback_provider: str = "MiniScheme-Proxy") -> List[Dict[str, Any]]:
     """Builds robust fallback weather data conforming to weather.scm schema."""
-    city_name = "北京" if (not loc or loc.strip().lower() == "auto") else loc.strip()
+    city_name = locate_place(loc)["name"] if (not loc or loc.strip().lower() == "auto") else loc.strip()
     now_struct = time.localtime()
     now_hhmm = time.strftime("%H:%M", now_struct)
 
@@ -1164,8 +1272,155 @@ def get_futures(view: str = "home", codes: str = "RB0,AU0,CU0", chart: str = "")
 
 
 # ---------------------------------------------------------------------------
-# 6. Calendar Almanac (/app/calendar)
+# 6. Calendar Almanac & Sky Astronomical Calculations (/app/calendar)
 # ---------------------------------------------------------------------------
+
+MOON_PHASES = ["新月", "蛾眉月", "上弦月", "盈凸月", "满月", "亏凸月", "下弦月", "残月"]
+
+
+def _rev(x: float) -> float:
+    return x % 360.0
+
+
+def _sun_ecliptic(d: float):
+    """Ecliptic longitude of the sun, d days from 2000 Jan 0.0 UT (Schlyter)."""
+    w = 282.9404 + 4.70935e-5 * d
+    e = 0.016709 - 1.151e-9 * d
+    m = _rev(356.0470 + 0.9856002585 * d)
+    ea = m + math.degrees(e * math.sin(math.radians(m)) * (1 + e * math.cos(math.radians(m))))
+    xv = math.cos(math.radians(ea)) - e
+    yv = math.sqrt(1 - e * e) * math.sin(math.radians(ea))
+    return _rev(math.degrees(math.atan2(yv, xv)) + w), m, w
+
+
+def _moon_ecliptic(d: float):
+    """Geocentric ecliptic longitude and latitude of the moon (Schlyter)."""
+    n = _rev(125.1228 - 0.0529538083 * d)
+    i = 5.1454
+    w = _rev(318.0634 + 0.1643573223 * d)
+    e = 0.054900
+    m = _rev(115.3654 + 13.0649929509 * d)
+    ea = m + math.degrees(e * math.sin(math.radians(m)) * (1 + e * math.cos(math.radians(m))))
+    for _ in range(3):
+        ea = ea - (ea - math.degrees(e * math.sin(math.radians(ea))) - m) / (1 - e * math.cos(math.radians(ea)))
+    xv = 60.2666 * (math.cos(math.radians(ea)) - e)
+    yv = 60.2666 * math.sqrt(1 - e * e) * math.sin(math.radians(ea))
+    v = math.degrees(math.atan2(yv, xv))
+    r = math.hypot(xv, yv)
+    rn, ri, vw = math.radians(n), math.radians(i), math.radians(v + w)
+    xh = r * (math.cos(rn) * math.cos(vw) - math.sin(rn) * math.sin(vw) * math.cos(ri))
+    yh = r * (math.sin(rn) * math.cos(vw) + math.cos(rn) * math.sin(vw) * math.cos(ri))
+    zh = r * math.sin(vw) * math.sin(ri)
+    lon = math.degrees(math.atan2(yh, xh))
+    lat = math.degrees(math.atan2(zh, math.hypot(xh, yh)))
+    _, ms, ws = _sun_ecliptic(d)
+    ls = _rev(ms + ws)
+    lm = _rev(n + w + m)
+    dd = lm - ls
+    f = lm - n
+    lon += (-1.274 * math.sin(math.radians(m - 2 * dd)) + 0.658 * math.sin(math.radians(2 * dd))
+            - 0.186 * math.sin(math.radians(ms)) - 0.059 * math.sin(math.radians(2 * m - 2 * dd))
+            - 0.057 * math.sin(math.radians(m - 2 * dd + ms)) + 0.053 * math.sin(math.radians(m + 2 * dd))
+            + 0.046 * math.sin(math.radians(2 * dd - ms)) + 0.041 * math.sin(math.radians(m - ms))
+            - 0.035 * math.sin(math.radians(dd)) - 0.031 * math.sin(math.radians(m + ms))
+            - 0.015 * math.sin(math.radians(2 * f - 2 * dd)) + 0.011 * math.sin(math.radians(m - 4 * dd)))
+    lat += (-0.173 * math.sin(math.radians(f - 2 * dd)) - 0.055 * math.sin(math.radians(m - f - 2 * dd))
+            - 0.046 * math.sin(math.radians(m + f - 2 * dd)) + 0.033 * math.sin(math.radians(f + 2 * dd))
+            + 0.017 * math.sin(math.radians(2 * m + f)))
+    return _rev(lon), lat
+
+
+def _day_number(t: datetime.datetime) -> float:
+    return (t - datetime.datetime(1999, 12, 31, tzinfo=datetime.timezone.utc)).total_seconds() / 86400.0
+
+
+def _alt_az(lon_ecl: float, lat_ecl: float, d: float, lat: float, lon: float):
+    ecl = math.radians(23.4393 - 3.563e-7 * d)
+    lo, la = math.radians(lon_ecl), math.radians(lat_ecl)
+    x = math.cos(lo) * math.cos(la)
+    y = math.sin(lo) * math.cos(la) * math.cos(ecl) - math.sin(la) * math.sin(ecl)
+    z = math.sin(lo) * math.cos(la) * math.sin(ecl) + math.sin(la) * math.cos(ecl)
+    ra = math.degrees(math.atan2(y, x))
+    dec = math.asin(z)
+    _, ms, ws = _sun_ecliptic(d)
+    gmst0 = _rev(ms + ws + 180.0)
+    ut_hours = (d - math.floor(d)) * 24.0
+    lst = gmst0 + ut_hours * 15.0 + lon
+    ha = math.radians(_rev(lst - ra))
+    phi = math.radians(lat)
+    alt = math.asin(math.sin(phi) * math.sin(dec) + math.cos(phi) * math.cos(dec) * math.cos(ha))
+    az = math.degrees(math.atan2(-math.sin(ha) * math.cos(dec),
+                                 math.cos(phi) * math.sin(dec) - math.sin(phi) * math.cos(dec) * math.cos(ha)))
+    return math.degrees(alt), _rev(az)
+
+
+def sun_pos(t: datetime.datetime, lat: float, lon: float):
+    d = _day_number(t)
+    ls, _, _ = _sun_ecliptic(d)
+    return _alt_az(ls, 0.0, d, lat, lon)
+
+
+def moon_pos(t: datetime.datetime, lat: float, lon: float):
+    d = _day_number(t)
+    lm, bm = _moon_ecliptic(d)
+    alt, az = _alt_az(lm, bm, d, lat, lon)
+    return alt - 0.95 * math.cos(math.radians(alt)), az
+
+
+def moon_elongation(t: datetime.datetime) -> float:
+    d = _day_number(t)
+    return _rev(_moon_ecliptic(d)[0] - _sun_ecliptic(d)[0])
+
+
+def _rise_set(pos_fn, day_start: datetime.datetime, lat: float, lon: float, horizon: float):
+    rise = sett = None
+    prev = pos_fn(day_start, lat, lon)[0] - horizon
+    for k in range(1, 289):
+        t = day_start + datetime.timedelta(minutes=5 * k)
+        cur = pos_fn(t, lat, lon)[0] - horizon
+        if prev < 0 <= cur and rise is None:
+            rise = t - datetime.timedelta(minutes=5 * cur / ((cur - prev) or 1))
+        if prev >= 0 > cur and sett is None:
+            sett = t - datetime.timedelta(minutes=5 * cur / ((cur - prev) or 1))
+        prev = cur
+    fmt = (lambda x: x.astimezone().strftime("%H:%M") if x else "--")
+    return fmt(rise), fmt(sett)
+
+
+def _next_moon(now: datetime.datetime, target: float):
+    prev = _rev(moon_elongation(now) - target)
+    for h in range(1, 31 * 24):
+        t = now + datetime.timedelta(hours=h)
+        cur = _rev(moon_elongation(t) - target)
+        if cur < prev:
+            return t - datetime.timedelta(hours=cur / (((cur + 360.0 - prev) or 1)))
+        prev = cur
+    return None
+
+
+def cal_sky(place: Dict[str, Any]) -> List[Dict[str, str]]:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    lat, lon = place["lat"], place["lon"]
+    local = now.astimezone()
+    day_start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(datetime.timezone.utc)
+    elong = moon_elongation(now)
+    illum = (1 - math.cos(math.radians(elong))) / 2
+    phase = MOON_PHASES[int(((elong + 22.5) % 360) // 45)]
+    nf, nn = _next_moon(now, 180.0), _next_moon(now, 0.0)
+    fmt = (lambda t: t.astimezone().strftime("%m-%d %H:%M") if t else "--")
+    s_alt, s_az = sun_pos(now, lat, lon)
+    m_alt, m_az = moon_pos(now, lat, lon)
+    s_rise, s_set = _rise_set(sun_pos, day_start, lat, lon, -0.833)
+    m_rise, m_set = _rise_set(moon_pos, day_start, lat, lon, 0.125)
+    return [
+        {"t": "moon", "a": phase, "b": str(round(illum * 100)), "c": f"{elong / 360 * 29.53:.1f}",
+         "d": str(round(elong)), "e": f"{fmt(nf)},{fmt(nn)}"},
+        {"t": "sun", "a": str(round(s_az)), "b": f"{s_alt:.1f}", "c": s_rise, "d": s_set},
+        {"t": "moonpos", "a": str(round(m_az)), "b": f"{m_alt:.1f}", "c": m_rise, "d": m_set},
+        {"t": "loc", "a": place["name"], "b": f"{lat:.2f}", "c": f"{lon:.2f}"},
+        {"t": "upd", "a": time.strftime("%H:%M", time.localtime())}
+    ]
+
 
 def get_calendar(view: str = "today", cd: str = "", wc: str = "", loc: str = "auto") -> Dict[str, Any]:
     """Provides calendar almanac, monthly grid, and sky phase data."""
@@ -1192,14 +1447,8 @@ def get_calendar(view: str = "today", cd: str = "", wc: str = "", loc: str = "au
         return {"items": items}
 
     if view == "sky":
-        return {
-            "items": [
-                {"t": "loc", "a": "本地" if loc in ("", "auto") else loc},
-                {"t": "moon", "a": "盈凸月", "b": "78", "c": "12", "d": "145", "e": "42"},
-                {"t": "sun", "a": "06:12", "b": "18:24", "c": "210", "d": "52"},
-                {"t": "upd", "a": time.strftime("%H:%M", now_struct)}
-            ]
-        }
+        place = locate_place(loc)
+        return {"items": cal_sky(place)}
 
     items = [
         {"t": "cdate", "a": f"{yr}年{mo:02d}月{dy:02d}日", "b": wk},

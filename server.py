@@ -895,11 +895,13 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 }, status=403)
             proxy_ctx.ensure_initialized()
             from proxy.crypto import (
+                derive_hardware_hash_key,
                 derive_master_key_2,
                 derive_request_keys,
                 verify_challenge_response,
                 aes_gcm_encrypt,
                 aes_gcm_decrypt,
+                pack_channel_response,
             )
             content_length = int(self.headers.get("Content-Length", 0))
             raw_body = self.rfile.read(content_length) if content_length > 0 else b""
@@ -910,6 +912,13 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     mac = payload["mac"].replace(":", "").replace("-", "").upper()
                 except Exception as e:
                     return self._json_reply({"success": False, "error": f"invalid payload: {e}"}, 400)
+
+                if "hardware_password" in payload:
+                    hw_pass = payload["hardware_password"]
+                    hw_hash_key = derive_hardware_hash_key(hw_pass, mac)
+                    m2 = derive_master_key_2(proxy_ctx.master_key_1, hw_hash_key, mac)
+                    proxy_ctx.db.register_device(mac, hw_hash_key, m2, self.client_address[0])
+                    return self._json_reply({"success": True, "status": "registered", "master_key_2": m2.hex(), "time": int(time.time())})
 
                 if "response" in payload:
                     response = bytes.fromhex(payload["response"])
@@ -933,32 +942,52 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     return self._json_reply({"success": True, "status": "registered", "master_key_2": m2.hex(), "time": int(time.time())})
 
             if req_path == "/channel":
-                if len(raw_body) < 41 or raw_body[:4] != b"MSC1":
+                if len(raw_body) < 5 + 16 + 4 + 16 or raw_body[:4] != b"MSC1":
                     return self._json_reply({"error": "malformed channel frame"}, 400)
                 id_len = raw_body[4]
                 mac = raw_body[5:5 + id_len].decode("utf-8", "replace").upper().replace(":", "").replace("-", "")
-                nonce = raw_body[5 + id_len:21 + id_len]
-                size = struct.unpack(">I", raw_body[21 + id_len:25 + id_len])[0]
-                ct_tag = raw_body[25 + id_len:25 + id_len + size + 16]
+                nonce = raw_body[5 + id_len:5 + id_len + 16]
+                size = struct.unpack(">I", raw_body[5 + id_len + 16:5 + id_len + 20])[0]
+                ct_tag = raw_body[5 + id_len + 20:5 + id_len + 20 + size + 16]
+
                 dev = proxy_ctx.db.get_device(mac)
                 if not dev:
                     return self._json_reply({"error": "unknown device"}, 403)
-                k_req, k_resp = derive_request_keys(dev["master_key_2"], nonce)
+
+                m2 = dev["master_key_2"]
+                k_req, k_resp = derive_request_keys(m2, nonce)
+
+                aad = raw_body[:5 + id_len + 20]
                 try:
-                    pt = aes_gcm_decrypt(k_req, nonce, ct_tag, raw_body[:25 + id_len])
+                    pt = aes_gcm_decrypt(k_req, bytes(12), ct_tag, aad)
                 except Exception:
-                    return self._json_reply({"error": "auth tag failed"}, 403)
+                    try:
+                        pt = aes_gcm_decrypt(k_req, nonce, ct_tag, aad)
+                    except Exception:
+                        return self._json_reply({"error": "authentication tag failed"}, 403)
+
+                ts = struct.unpack(">I", pt[:4])[0]
+                now = int(time.time())
+                # Relaxed timestamp validation (allow clock drift up to 7 days)
+                if ts != 0 and abs(now - ts) > 604800:
+                    return self._json_reply({"error": f"timestamp skewed by {ts - now}s"}, 403)
+
                 m_len = pt[4]
+                method = pt[5:5 + m_len].decode("ascii", "replace")
                 u_len = struct.unpack(">H", pt[5 + m_len:7 + m_len])[0]
                 url = pt[7 + m_len:7 + m_len + u_len].decode("utf-8", "replace")
+                body = pt[7 + m_len + u_len:]
+
                 status, _, resp_body = handle_proxy_endpoint(url)
-                resp_nonce = secrets.token_bytes(16)
-                resp_hdr = struct.pack(">HI", status, len(resp_body))
-                sealed = aes_gcm_encrypt(k_resp, resp_nonce, resp_hdr + resp_body, resp_nonce)
-                out = resp_nonce + sealed
+                out = pack_channel_response(k_resp, status, resp_body)
+                client_ip = self.client_address[0]
+                proxy_ctx.db.update_device_seen(mac, client_ip)
+                proxy_ctx.db.log_access(mac, client_ip, method, url, status, len(raw_body))
+
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Length", str(len(out)))
+                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(out)
                 return

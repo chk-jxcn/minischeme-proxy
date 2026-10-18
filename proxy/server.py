@@ -70,11 +70,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_header(self, keyword, value):
+        # Prevent duplicate CORS headers that violate browser CORS policies (e.g. multiple "*, *")
+        k_lower = keyword.lower()
+        if k_lower in ("access-control-allow-origin", "access-control-allow-private-network"):
+            prefix = f"{k_lower}:".encode("latin-1")
+            if hasattr(self, "_headers_buffer") and any(
+                h.lower().startswith(prefix) for h in self._headers_buffer
+            ):
+                return
+        super().send_header(keyword, value)
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE, HEAD")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range, Cache-Control, Pragma")
         self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, X-MiniScheme-Auth")
         self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Access-Control-Max-Age", "86400")

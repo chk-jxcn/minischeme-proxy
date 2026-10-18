@@ -468,11 +468,19 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 pass
 
+    def send_header(self, keyword, value):
+        # Prevent duplicate CORS headers that violate browser CORS policies (e.g. multiple "*, *")
+        k_lower = keyword.lower()
+        if k_lower in ("access-control-allow-origin", "access-control-allow-private-network"):
+            prefix = f"{k_lower}:".encode("latin-1")
+            if hasattr(self, "_headers_buffer") and any(
+                h.lower().startswith(prefix) for h in self._headers_buffer
+            ):
+                return
+        super().send_header(keyword, value)
+
     def do_OPTIONS(self):
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth")
         self.end_headers()
 
     def do_GET(self):
@@ -1006,6 +1014,11 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "text/css; charset=utf-8")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE, HEAD")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range, Cache-Control, Pragma")
+        self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, X-MiniScheme-Auth")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.send_header("Access-Control-Max-Age", "86400")
         super().end_headers()
 
 

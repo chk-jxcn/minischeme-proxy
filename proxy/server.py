@@ -192,11 +192,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         xff = self.headers.get("X-Forwarded-For")
         if xff:
             ip = xff.split(",")[0].strip()
+            if ":" in ip and not ip.startswith("[") and ip.count(":") == 1:
+                ip = ip.split(":")[0].strip()
             if ip:
                 return ip
         x_real = self.headers.get("X-Real-IP")
         if x_real:
             ip = x_real.strip()
+            if ":" in ip and not ip.startswith("[") and ip.count(":") == 1:
+                ip = ip.split(":")[0].strip()
             if ip:
                 return ip
         if hasattr(self, "client_address") and self.client_address:
@@ -377,7 +381,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 else:
                     # Brand new device: derive master_key_2 and register (Step 2 - 1 RTT)
                     m2 = derive_master_key_2(self.server_ctx.master_key_1, hw_hash_key, mac)
-                    client_ip = self.client_address[0]
+                    client_ip = self._get_client_ip()
                     self.server_ctx.db.register_device(mac, hw_hash_key, m2, client_ip)
                     self.server_ctx.db.log_access(mac, client_ip, "POST", "/channel/auth", 200, len(raw_body))
                     return self._send_json({
@@ -425,7 +429,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 uuid = payload.get("uuid", "")
                 if not uuid:
                     return self._send_json({"success": False, "error": "missing uuid"}, 400)
-                client_ip = self.client_address[0]
+                client_ip = self._get_client_ip()
                 self.server_ctx.db.register_simulator(uuid, client_ip)
                 return self._send_json({"success": True})
             except Exception as e:
@@ -437,7 +441,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 uuid = payload.get("uuid", "")
                 if not uuid:
                     return self._send_json({"success": False, "error": "missing uuid"}, 400)
-                client_ip = self.client_address[0]
+                client_ip = self._get_client_ip()
                 ok, res = verify_simulator_login(uuid, self.server_ctx.db, client_ip)
                 if ok:
                     return self._send_json({"success": True, "token": res, "mac": uuid.upper()})

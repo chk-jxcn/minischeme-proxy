@@ -122,6 +122,11 @@ def locate_place(loc: str = "auto", client_ip: str = "") -> Dict[str, Any]:
 
     # IP Geolocation: determine effective public IP to locate
     target_ip = (client_ip or "").strip()
+    if "," in target_ip:
+        target_ip = target_ip.split(",")[0].strip()
+    if ":" in target_ip and not target_ip.startswith("[") and target_ip.count(":") == 1:
+        target_ip = target_ip.split(":")[0].strip()
+
     if is_private_ip(target_ip):
         # Local or loopback request: probe public egress IP
         try:
@@ -133,6 +138,16 @@ def locate_place(loc: str = "auto", client_ip: str = "") -> Dict[str, Any]:
                     target_ip = m_ip.group(1)
         except Exception:
             pass
+        if not target_ip or is_private_ip(target_ip):
+            try:
+                req = urllib.request.Request("https://api.ipify.org", headers={"User-Agent": "MiniScheme-Proxy/1.0"})
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    text = resp.read().decode("utf-8", "replace").strip()
+                    m_ip = re.search(r"(\d+\.\d+\.\d+\.\d+)", text)
+                    if m_ip:
+                        target_ip = m_ip.group(1)
+            except Exception:
+                pass
 
     cache_key = f"ip_geo_{target_ip}" if target_ip and not is_private_ip(target_ip) else "ip_geo_default"
     hit = cache.get(cache_key)
@@ -1677,6 +1692,7 @@ def handle_app_query(path_with_query: str, client_ip: str = ""):
     parsed = urllib.parse.urlparse(path_with_query)
     path = parsed.path
     qs = urllib.parse.parse_qs(parsed.query)
+    effective_ip = (qs.get("client_ip", [""])[0] or qs.get("ip", [""])[0] or client_ip or "").strip()
 
     if path == "/app/weather":
         data = get_weather(
@@ -1684,7 +1700,7 @@ def handle_app_query(path_with_query: str, client_ip: str = ""):
             key=qs.get("key", [""])[0],
             host=qs.get("host", [""])[0],
             token=qs.get("token", [""])[0],
-            client_ip=client_ip
+            client_ip=effective_ip
         )
     elif path == "/app/news":
         data = get_news(qs.get("cat", ["all"])[0], int(qs.get("n", ["8"])[0]))
@@ -1713,7 +1729,7 @@ def handle_app_query(path_with_query: str, client_ip: str = ""):
             qs.get("cd", [""])[0],
             qs.get("wc", [""])[0],
             qs.get("loc", ["auto"])[0],
-            client_ip=client_ip
+            client_ip=effective_ip
         )
     elif path == "/app/usage":
         data = get_usage()

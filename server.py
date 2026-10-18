@@ -394,7 +394,7 @@ def fetch_latest_release_asset(repo, asset_name):
     return 404, "application/json", b'{"error":"release asset not found"}'
 
 
-def handle_proxy_endpoint(path_with_query):
+def handle_proxy_endpoint(path_with_query, client_ip=""):
     """Dispatch /app/*, /health, and /market/* requests in-process."""
     parsed = urllib.parse.urlparse(path_with_query)
     path = parsed.path
@@ -417,6 +417,11 @@ def handle_proxy_endpoint(path_with_query):
         target_url = (qs.get("url") or [""])[0]
         if not target_url.startswith(("http://", "https://")):
             return 400, "text/plain", b"missing or invalid url"
+        p_target = urllib.parse.urlparse(target_url)
+        if p_target.path.startswith("/app/") or p_target.path == "/health":
+            sub_url = p_target.path + ("?" + p_target.query if p_target.query else "")
+            from proxy.endpoints import handle_app_query
+            return handle_app_query(sub_url, client_ip=client_ip)
         try:
             req = urllib.request.Request(target_url, headers={"User-Agent": "MiniScheme-Proxy/1.0"})
             with urllib.request.urlopen(req, timeout=5) as resp:
@@ -427,7 +432,7 @@ def handle_proxy_endpoint(path_with_query):
             return 502, "text/plain", f"fetch error: {e}".encode("utf-8")
 
     from proxy.endpoints import handle_app_query
-    return handle_app_query(path_with_query)
+    return handle_app_query(path_with_query, client_ip=client_ip)
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +483,25 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             ):
                 return
         super().send_header(keyword, value)
+
+    def _get_client_ip(self) -> str:
+        xff = self.headers.get("X-Forwarded-For")
+        if xff:
+            ip = xff.split(",")[0].strip()
+            if ":" in ip and not ip.startswith("[") and ip.count(":") == 1:
+                ip = ip.split(":")[0].strip()
+            if ip:
+                return ip
+        x_real = self.headers.get("X-Real-IP")
+        if x_real:
+            ip = x_real.strip()
+            if ":" in ip and not ip.startswith("[") and ip.count(":") == 1:
+                ip = ip.split(":")[0].strip()
+            if ip:
+                return ip
+        if hasattr(self, "client_address") and self.client_address:
+            return str(self.client_address[0]).strip()
+        return ""
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -569,11 +593,12 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     "error": "Plaintext protocol is disabled on this server. Encrypted channel protocol (MSC1) is required."
                 }, status=403)
                 return
-            status, ctype, body = handle_proxy_endpoint(self.path)
+            status, ctype, body = handle_proxy_endpoint(self.path, client_ip=self._get_client_ip())
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Private-Network", "true")
             self.end_headers()
             self.wfile.write(body)
             return
@@ -599,11 +624,12 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 or parsed.path == "/health"
             ):
                 p_query = parsed.path + ("?" + parsed.query if parsed.query else "")
-                status, ctype, body = handle_proxy_endpoint(p_query)
+                status, ctype, body = handle_proxy_endpoint(p_query, client_ip=self._get_client_ip())
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Private-Network", "true")
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -841,7 +867,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 uuid = payload.get("uuid", "")
                 if not uuid:
                     return self._json_reply({"success": False, "error": "missing uuid"}, 400)
-                client_ip = self.client_address[0]
+                client_ip = self._get_client_ip()
                 proxy_ctx.db.register_simulator(uuid, client_ip)
                 return self._json_reply({"success": True})
 
@@ -849,7 +875,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 uuid = payload.get("uuid", "")
                 if not uuid:
                     return self._json_reply({"success": False, "error": "missing uuid"}, 400)
-                client_ip = self.client_address[0]
+                client_ip = self._get_client_ip()
                 ok, res = verify_simulator_login(uuid, proxy_ctx.db, client_ip)
                 if ok:
                     return self._json_reply({"success": True, "token": res, "mac": uuid.upper()})
@@ -925,7 +951,8 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     hw_pass = payload["hardware_password"]
                     hw_hash_key = derive_hardware_hash_key(hw_pass, mac)
                     m2 = derive_master_key_2(proxy_ctx.master_key_1, hw_hash_key, mac)
-                    proxy_ctx.db.register_device(mac, hw_hash_key, m2, self.client_address[0])
+                    client_ip = self._get_client_ip()
+                    proxy_ctx.db.register_device(mac, hw_hash_key, m2, client_ip)
                     return self._json_reply({"success": True, "status": "registered", "master_key_2": m2.hex(), "time": int(time.time())})
 
                 if "response" in payload:
@@ -946,7 +973,8 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                         proxy_ctx.recovery_challenges[mac] = (ch_nonce, time.time() + 60)
                         return self._json_reply({"success": True, "status": "challenge_required", "challenge": ch_nonce.hex(), "time": int(time.time())})
                     m2 = derive_master_key_2(proxy_ctx.master_key_1, hw_hash_key, mac)
-                    proxy_ctx.db.register_device(mac, hw_hash_key, m2, self.client_address[0])
+                    client_ip = self._get_client_ip()
+                    proxy_ctx.db.register_device(mac, hw_hash_key, m2, client_ip)
                     return self._json_reply({"success": True, "status": "registered", "master_key_2": m2.hex(), "time": int(time.time())})
 
             if req_path == "/channel":
@@ -986,9 +1014,9 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 url = pt[7 + m_len:7 + m_len + u_len].decode("utf-8", "replace")
                 body = pt[7 + m_len + u_len:]
 
-                status, _, resp_body = handle_proxy_endpoint(url)
+                client_ip = self._get_client_ip()
+                status, _, resp_body = handle_proxy_endpoint(url, client_ip=client_ip)
                 out = pack_channel_response(k_resp, status, resp_body)
-                client_ip = self.client_address[0]
                 proxy_ctx.db.update_device_seen(mac, client_ip)
                 proxy_ctx.db.log_access(mac, client_ip, method, url, status, len(raw_body))
 
@@ -996,6 +1024,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Type", "application/octet-stream")
                 self.send_header("Content-Length", str(len(out)))
                 self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Private-Network", "true")
                 self.end_headers()
                 self.wfile.write(out)
                 return

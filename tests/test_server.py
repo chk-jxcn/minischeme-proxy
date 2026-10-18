@@ -210,3 +210,29 @@ def test_weather_with_token_and_non_persistence(proxy_server):
     conn.close()
 
 
+def test_weather_ip_geolocation(proxy_server):
+    """Verifies that weather location is automatically determined from client IP."""
+    base_url, _, _ = proxy_server
+
+    # 1. Test with client_ip query parameter
+    req = urllib.request.urlopen(f"{base_url}/app/weather?loc=auto&client_ip=112.66.140.64")
+    assert req.status == 200
+    data = json.loads(req.read().decode())
+    loc_items = [it for it in data["items"] if it.get("t") == "loc"]
+    assert len(loc_items) > 0
+    assert "澄迈" in loc_items[0]["a"]
+
+    # 2. Test with X-Forwarded-For header (including port strip)
+    hdr_req = urllib.request.Request(
+        f"{base_url}/app/weather?loc=auto",
+        headers={"X-Forwarded-For": "112.66.140.64:12345"}
+    )
+    res = urllib.request.urlopen(hdr_req)
+    assert res.status == 200
+    data2 = json.loads(res.read().decode())
+    loc_items2 = [it for it in data2["items"] if it.get("t") == "loc"]
+    assert len(loc_items2) > 0
+    assert "澄迈" in loc_items2[0]["a"]
+
+
+

@@ -13,7 +13,6 @@ preventing latency during page transitions on the hardware device.
 """
 
 import concurrent.futures
-import configparser
 import datetime
 import gzip
 import json
@@ -577,31 +576,32 @@ def build_fallback_weather(loc: str, fallback_provider: str = "MiniScheme-Proxy"
     return items
 
 
+_QWEATHER_DEFAULT = {"key": "", "host": ""}
+_QWEATHER_HOST_RE = re.compile(r"^(?:[a-z0-9-]+\.re\.qweatherapi\.com|(?:dev|geo)?api\.qweather\.com|[a-z0-9-]+\.qweatherapi\.com)$")
+
+
+def set_qweather_default(key: str, host: str):
+    """The server's own QWeather credentials (config.ini [qweather]), used for
+    devices that send no token of their own."""
+    _QWEATHER_DEFAULT["key"] = (key or "").strip()
+    _QWEATHER_DEFAULT["host"] = clean_qweather_host(host)
+
+
+def clean_qweather_host(host: str) -> str:
+    """host when it is a QWeather API host, else "" (never send a key elsewhere)."""
+    h = (host or "").strip().lower()
+    for prefix in ("https://", "http://"):
+        if h.startswith(prefix):
+            h = h[len(prefix):]
+    h = h.split("/", 1)[0]
+    return h if _QWEATHER_HOST_RE.match(h) else ""
+
+
 def get_qweather_default_config():
-    """Reads [qweather] key and host from config.ini or app_proxy.local.ini if available."""
-    cfg = configparser.ConfigParser()
-    cur_dir = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        "app_proxy.local.ini",
-        "config.ini",
-        "/opt/minischeme-proxy/config.ini",
-        os.path.join(cur_dir, "..", "config.ini"),
-        os.path.join(cur_dir, "..", "app_proxy.local.ini"),
-        os.path.join(cur_dir, "..", "..", "tools", "app_proxy.local.ini"),
-        os.path.join(cur_dir, "..", "..", "..", "tools", "app_proxy.local.ini"),
-    ]
-    for p in candidates:
-        if os.path.isfile(p):
-            try:
-                cfg.read(p, encoding="utf-8")
-                if cfg.has_section("qweather"):
-                    k = cfg.get("qweather", "key", fallback="").strip()
-                    h = cfg.get("qweather", "host", fallback="").strip()
-                    if k:
-                        return k, h
-            except Exception:
-                pass
-    return "", ""
+    """(key, host): the environment (MINISCHEME_QWEATHER_KEY / _HOST) or the server's config."""
+    k = os.getenv("MINISCHEME_QWEATHER_KEY", "").strip() or _QWEATHER_DEFAULT["key"]
+    h = clean_qweather_host(os.getenv("MINISCHEME_QWEATHER_HOST", "")) or _QWEATHER_DEFAULT["host"]
+    return k, h
 
 
 def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "", client_ip: str = "") -> Dict[str, Any]:
@@ -611,14 +611,11 @@ def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "
     Cached in RAM for 10 minutes (600 seconds) per (loc, token, host, client_ip) tuple.
     """
     tok = (token or key or "").strip()
-    hst = (host or "").strip()
+    hst = clean_qweather_host(host)
 
-    if not tok or not hst:
-        def_k, def_h = get_qweather_default_config()
-        if not tok:
-            tok = def_k
-        if not hst:
-            hst = def_h
+    if not tok:
+        # The server's key goes only to the server's own (QWeather) host.
+        tok, hst = get_qweather_default_config()
 
     cache_key = f"weather:{loc}:{tok}:{hst}:{client_ip}" if (not loc or loc.strip().lower() == "auto") else f"weather:{loc}:{tok}:{hst}"
     hit = cache.get(cache_key)
@@ -1007,15 +1004,13 @@ def get_stocks(view: str = "home", codes: str = "sh600519,sz300750,sz000858", in
 # 4. Crypto Market (/app/crypto) - Supports view=all for all pages
 # ---------------------------------------------------------------------------
 
-CRYPTO_FALLBACK_DATA = {
-    "BTC": {"name": "BTC", "price": 81650.0, "open": 79700.0, "pct": 2.45, "high": 82500.0, "low": 80100.0, "vol": 3.2e8},
-    "ETH": {"name": "ETH", "price": 3520.5, "open": 3456.5, "pct": 1.85, "high": 3580.0, "low": 3440.0, "vol": 1.8e8},
-    "SOL": {"name": "SOL", "price": 158.4, "open": 150.6, "pct": 5.20, "high": 162.0, "low": 149.0, "vol": 6.5e7},
-    "BNB": {"name": "BNB", "price": 585.0, "open": 579.7, "pct": 0.92, "high": 592.0, "low": 578.0, "vol": 4.2e7},
-    "XRP": {"name": "XRP", "price": 0.582, "open": 0.575, "pct": 1.15, "high": 0.595, "low": 0.570, "vol": 3.1e7},
-    "DOGE": {"name": "DOGE", "price": 0.128, "open": 0.124, "pct": 3.40, "high": 0.132, "low": 0.122, "vol": 2.8e7},
-    "ADA": {"name": "ADA", "price": 0.355, "open": 0.352, "pct": 0.80, "high": 0.362, "low": 0.348, "vol": 1.9e7},
-}
+CRYPTO_DEFAULT = ["BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA"]
+_CRYPTO_UA = {"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"}
+_crypto_last_good: Dict[str, Dict[str, Any]] = {}
+
+
+class CryptoUnavailable(Exception):
+    """No market source answered: the app keeps what it shows (never invented prices)."""
 
 
 def crypto_clean_sym(s: str) -> str:
@@ -1023,167 +1018,176 @@ def crypto_clean_sym(s: str) -> str:
     return s[:-4] if s.endswith("USDT") and len(s) > 4 else s
 
 
+def _crypto_json(url: str) -> Any:
+    req = urllib.request.Request(url, headers=_CRYPTO_UA)
+    with urllib.request.urlopen(req, timeout=4.0) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def fetch_live_crypto_ticker(sym: str) -> Optional[Dict[str, Any]]:
+    """SYM-USDT over 24 h from OKX, else Huobi: {price, open, high, low, vol (USDT)}, or None."""
     try:
-        url = f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"})
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
-        rows = d.get("data") or []
+        rows = _crypto_json(f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT").get("data") or []
         if rows:
             r = rows[0]
             last = _safe_float(r.get("last"))
-            open24 = _safe_float(r.get("open24h"))
-            high = _safe_float(r.get("high24h"))
-            low = _safe_float(r.get("low24h"))
-            vol = _safe_float(r.get("volCcy24h"))
             if last > 0:
-                pct = ((last - open24) / open24 * 100) if open24 > 0 else 0.0
-                return {"price": last, "open": open24 or last, "high": high or last, "low": low or last, "vol": vol, "pct": pct}
+                return {"price": last, "open": _safe_float(r.get("open24h")), "high": _safe_float(r.get("high24h")),
+                        "low": _safe_float(r.get("low24h")), "vol": _safe_float(r.get("volCcy24h"))}
+    except Exception:
+        pass
+    try:
+        t = _crypto_json(f"https://api.huobi.pro/market/detail/merged?symbol={sym.lower()}usdt").get("tick") or {}
+        last = _safe_float(t.get("close"))
+        if last > 0:
+            return {"price": last, "open": _safe_float(t.get("open")), "high": _safe_float(t.get("high")),
+                    "low": _safe_float(t.get("low")), "vol": _safe_float(t.get("vol"))}
+    except Exception:
+        pass
+    return None
+
+
+def fetch_crypto_closes(sym: str, bar: str, limit: int) -> List[float]:
+    """Closing prices of SYM-USDT, oldest first (bar "1H" or "1D"), OKX else Huobi; [] when none."""
+    try:
+        rows = _crypto_json(f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar={bar}&limit={limit}"
+                            ).get("data") or []
+        closes = [_safe_float(r[4]) for r in reversed(rows) if len(r) > 4 and _safe_float(r[4]) > 0]
+        if len(closes) >= 2:
+            return closes
+    except Exception:
+        pass
+    try:
+        period = "60min" if bar == "1H" else "1day"
+        rows = _crypto_json(f"https://api.huobi.pro/market/history/kline?symbol={sym.lower()}usdt"
+                            f"&period={period}&size={limit}").get("data") or []
+        return [_safe_float(r.get("close")) for r in reversed(rows) if _safe_float(r.get("close")) > 0]
+    except Exception:
+        return []
+
+
+def fetch_usd_cny() -> Optional[float]:
+    """USD/CNY (OKX's rate), cached for an hour; None when unavailable."""
+    hit = cache.get("crypto:usdcny")
+    if hit:
+        return hit
+    try:
+        rows = _crypto_json("https://www.okx.com/api/v5/market/exchange-rate").get("data") or [{}]
+        rate = _safe_float(rows[0].get("usdCny"))
+        if rate > 0:
+            cache.set("crypto:usdcny", rate, ttl_seconds=3600)
+            return rate
     except Exception:
         pass
     return None
 
 
 def make_crypto_item(sym: str, info: Dict[str, Any], rate: float) -> Dict[str, str]:
-    last = info.get("price", 100.0) * rate
-    pct = info.get("pct", 0.0)
-    high = info.get("high", last) * rate
-    low = info.get("low", last) * rate
-    vol = info.get("vol", 1e7) * rate
+    last, op = info["price"], info["open"]
+    pct = (last - op) / op * 100 if op > 0 else 0.0
+    high = info["high"] or last
+    low = info["low"] or last
     return {
         "t": "c",
         "a": sym,
-        "b": _fmt_price(last),
+        "b": _fmt_price(last * rate),
         "c": f"{pct:+.2f}",
-        "d": f"{_fmt_price(high)},{_fmt_price(low)}",
-        "e": _fmt_vol(vol)
+        "d": f"{_fmt_price(high * rate)},{_fmt_price(low * rate)}",
+        "e": _fmt_vol(info["vol"] * rate)
     }
 
 
-def make_crypto_trend_item(chart_sym: str, info: Dict[str, Any], rate: float) -> Dict[str, str]:
-    last = info.get("price", 100.0) * rate
-    open24 = info.get("open", 100.0) * rate
-    pct = info.get("pct", 0.0)
-    high = info.get("high", last) * rate
-    low = info.get("low", last) * rate
-    vol = info.get("vol", 1e7) * rate
-    pts = None
-    try:
-        url = f"https://www.okx.com/api/v5/market/candles?instId={chart_sym}-USDT&bar=1H&limit=24"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"})
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
-        rows = d.get("data") or []
-        closes = [_safe_float(r[4]) for r in reversed(rows) if len(r) > 4 and _safe_float(r[4]) > 0]
-        if len(closes) >= 2 and open24 > 0:
-            pts = [int(round((c * rate - open24) / open24 * 10000)) for c in closes]
-    except Exception:
-        pts = None
-    if not pts:
-        pts = [0, 10, 20, 15, 25, 35, 30, 45, 55, 50, 60, int(round(pct * 100))]
+def make_crypto_trend_item(sym: str, info: Dict[str, Any], rate: float) -> Optional[Dict[str, str]]:
+    """The 24 h hourly trend of sym (basis points from the 24 h open), or None without real candles."""
+    last, op = info["price"], info["open"]
+    closes = fetch_crypto_closes(sym, "1H", 24)
+    if len(closes) < 2 or op <= 0:
+        return None
+    high = info["high"] or last
+    low = info["low"] or last
     return {
         "t": "trend",
-        "a": ",".join(str(x) for x in pts),
-        "b": chart_sym,
-        "c": _fmt_price(last),
-        "d": f"{pct:+.2f}",
-        "e": f"{_fmt_price(high)},{_fmt_price(low)},{_fmt_vol(vol)}"
+        "a": ",".join(str(int(round((c - op) / op * 10000))) for c in closes),
+        "b": sym,
+        "c": _fmt_price(last * rate),
+        "d": f"{(last - op) / op * 100:+.2f}",
+        "e": f"{_fmt_price(high * rate)},{_fmt_price(low * rate)},{_fmt_vol(info['vol'] * rate)}"
     }
 
 
-def make_crypto_kline_item(sym: str, info: Dict[str, Any], rate: float) -> Dict[str, str]:
-    last = info.get("price", 100.0) * rate
-    pct = info.get("pct", 0.0)
-    pts = None
-    try:
-        url = f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar=1D&limit=8"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MiniScheme-Proxy/1.0"})
-        with urllib.request.urlopen(req, timeout=3.0) as resp:
-            d = json.loads(resp.read().decode("utf-8"))
-        rows = d.get("data") or []
-        closes = [_safe_float(r[4]) for r in reversed(rows) if len(r) > 4 and _safe_float(r[4]) > 0]
-        if len(closes) >= 2 and closes[0] > 0:
-            first = closes[0]
-            pts = [int(round((c - first) / first * 1000)) for c in closes]
-    except Exception:
-        pts = None
-    if not pts:
-        pts = [-15, -10, -5, 5, 12, 18, 22, int(round(pct * 10))]
+def make_crypto_kline_item(sym: str, rate: float) -> Optional[Dict[str, str]]:
+    """The last 8 daily closes of sym (per mille from the first), or None without real candles."""
+    closes = fetch_crypto_closes(sym, "1D", 8)
+    if len(closes) < 2:
+        return None
+    first = closes[0]
     return {
         "t": "k",
         "a": sym,
-        "b": ",".join(str(x) for x in pts),
-        "c": _fmt_price(last),
-        "d": f"{pct:+.1f}",
+        "b": ",".join(str(int(round((c - first) / first * 1000))) for c in closes),
+        "c": _fmt_price(closes[-1] * rate),
+        "d": f"{(closes[-1] - first) / first * 100:+.1f}",
         "e": sym
     }
 
 
 def get_crypto(view: str = "home", symbols: str = "BTC,ETH,SOL", chart: str = "", fiat: str = "usd") -> Dict[str, Any]:
-    """Fetches cryptocurrency quotes, trends, and klines.
+    """Cryptocurrency quotes, the chart coin's 24 h trend and daily klines,
+    live from OKX (Huobi as a fallback). Only real market data: a coin no
+    source answers for is left out, and when nothing answers the last good
+    answer is served (with its own update time) or CryptoUnavailable raised.
 
     Cached for 15 seconds.
     """
-    cache_key = f"crypto:{view}:{symbols}:{chart}:{fiat}"
+    sym_list = [crypto_clean_sym(s) for s in re.split(r"[,\s]+", symbols) if crypto_clean_sym(s)][:10] or CRYPTO_DEFAULT
+    chart_sym = crypto_clean_sym(chart) if chart.strip() else sym_list[0]
+    is_cny = (fiat or "").strip().lower() == "cny"
+    cache_key = f"crypto:{view}:{','.join(sym_list)}:{chart_sym}:{'cny' if is_cny else 'usd'}"
     hit = cache.get(cache_key)
     if hit:
         return hit
 
-    sym_list = [crypto_clean_sym(s) for s in re.split(r"[,\s]+", symbols) if crypto_clean_sym(s)][:10]
-    if not sym_list:
-        sym_list = ["BTC", "ETH", "SOL", "BNB", "XRP"]
-    chart_sym = crypto_clean_sym(chart) if chart.strip() else sym_list[0]
-    is_cny = (fiat or "").strip().lower() == "cny"
-    rate = 7.25 if is_cny else 1.0
+    try:
+        rate = 1.0
+        if is_cny:
+            rate = fetch_usd_cny()
+            if not rate:
+                raise CryptoUnavailable("no USD/CNY rate")
 
-    # Fetch live quotes concurrently
-    needed_syms = list(dict.fromkeys(sym_list + [chart_sym]))
-    info_map = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(needed_syms), 6)) as ex:
-        futs = {ex.submit(fetch_live_crypto_ticker, s): s for s in needed_syms}
-        for f in concurrent.futures.as_completed(futs):
-            s = futs[f]
-            try:
-                res = f.result()
+        needed = list(dict.fromkeys(sym_list + [chart_sym]))
+        info_map: Dict[str, Dict[str, Any]] = {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(needed), 6)) as ex:
+            futs = {ex.submit(fetch_live_crypto_ticker, s): s for s in needed}
+            for f in concurrent.futures.as_completed(futs):
+                try:
+                    res = f.result()
+                except Exception:
+                    res = None
                 if res:
-                    info_map[s] = res
-            except Exception:
-                pass
+                    info_map[futs[f]] = res
+        if not info_map:
+            raise CryptoUnavailable("no market source answered (OKX, Huobi)")
 
-    def get_info(s: str) -> Dict[str, Any]:
-        if s in info_map:
-            return info_map[s]
-        if s in CRYPTO_FALLBACK_DATA:
-            return CRYPTO_FALLBACK_DATA[s]
-        return {"name": s, "price": 100.0, "open": 98.0, "pct": 2.0, "high": 105.0, "low": 96.0, "vol": 1e7}
-
-    items: List[Dict[str, str]] = [
-        {"t": "meta", "a": "人民币" if is_cny else "USDT", "b": f"{rate:.4f}" if is_cny else "1"}
-    ]
-
-    coin_items = [make_crypto_item(s, get_info(s), rate) for s in sym_list]
-
-    if view == "list":
-        items += coin_items
-    elif view == "trend":
-        items.append(make_crypto_trend_item(chart_sym, get_info(chart_sym), rate))
-    elif view == "kline":
-        for s in sym_list[:6]:
-            items.append(make_crypto_kline_item(s, get_info(s), rate))
-    else:  # view == "all" or aggregated
-        items += coin_items
-        items.append(make_crypto_trend_item(chart_sym, get_info(chart_sym), rate))
-        for s in sym_list[:6]:
-            items.append(make_crypto_kline_item(s, get_info(s), rate))
-
-    items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
-    is_demo = not bool(info_map)
-    if is_demo:
-        items.insert(0, {"t": "demo", "a": "1", "b": "【演示数据】"})
-        items.insert(1, {"t": "title", "a": "加密货币【演示数据】"})
-    title = "加密货币【演示数据】" if is_demo else "加密货币"
-    data = {"title": title, "is_demo": is_demo, "items": items}
+        items: List[Dict[str, str]] = [
+            {"t": "meta", "a": "人民币" if is_cny else "USDT", "b": f"{rate:.4f}" if is_cny else "1"}
+        ]
+        if view in ("list", "all", "home"):
+            items += [make_crypto_item(s, info_map[s], rate) for s in sym_list if s in info_map]
+        if view in ("trend", "all", "home") and chart_sym in info_map:
+            trend = make_crypto_trend_item(chart_sym, info_map[chart_sym], rate)
+            if trend:
+                items.append(trend)
+        if view in ("kline", "all", "home"):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+                klines = list(ex.map(lambda s: make_crypto_kline_item(s, rate), sym_list[:6]))
+            items += [k for k in klines if k]
+        items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
+        data = {"title": "加密货币", "items": items}
+    except CryptoUnavailable:
+        if cache_key in _crypto_last_good:
+            return _crypto_last_good[cache_key]
+        raise
+    _crypto_last_good[cache_key] = data
     cache.set(cache_key, data, ttl_seconds=15)
     return data
 
@@ -1711,12 +1715,17 @@ def handle_app_query(path_with_query: str, client_ip: str = ""):
             qs.get("index", ["sh000001"])[0]
         )
     elif path == "/app/crypto":
-        data = get_crypto(
-            view=qs.get("view", ["all"])[0],
-            symbols=qs.get("symbols", ["BTC,ETH,SOL"])[0],
-            chart=qs.get("chart", [""])[0],
-            fiat=qs.get("fiat", ["usd"])[0]
-        )
+        try:
+            data = get_crypto(
+                view=qs.get("view", ["all"])[0],
+                symbols=qs.get("symbols", ["BTC,ETH,SOL"])[0],
+                chart=qs.get("chart", [""])[0],
+                fiat=qs.get("fiat", ["usd"])[0]
+            )
+        except CryptoUnavailable as e:
+            # no invented prices: the device keeps showing its last data
+            return 502, "application/json; charset=utf-8", _json.dumps(
+                {"error": f"crypto: {e}"}, ensure_ascii=False).encode("utf-8")
     elif path == "/app/futures":
         data = get_futures(
             view=qs.get("view", ["all"])[0],

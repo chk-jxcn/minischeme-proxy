@@ -10,6 +10,7 @@ import time
 import urllib.parse
 from typing import Tuple
 
+from .admin_password import can_change, check_new_password, read_admin_password, write_admin_password
 from .channel import ChannelError, answer, open_request, register_device, seal
 from .crypto import derive_master_key_2, verify_challenge_response
 from .database import Database
@@ -153,8 +154,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         # Admin API
         if path == "/api/admin/status":
             # app_proxy.py always has an admin password: the portal asks for it
+            # and says when a local server still uses the default "admin"
             mode = getattr(self.server_ctx, "protocol_mode", "both")
-            return self._send_json({"success": True, "auth_required": True, "protocol_mode": mode})
+            _, source = self.server_ctx.current_admin_password()
+            return self._send_json({"success": True, "auth_required": True, "protocol_mode": mode,
+                                    "default_password": source == "default",
+                                    "can_change_password": self.server_ctx.can_change_admin_password()})
 
         if path == "/api/admin/devices":
             token = self._session_token(qs)
@@ -496,10 +501,35 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 return self._send_json({"success": False, "error": "bad request"}, 400)
 
-            if self.server_ctx.admin_password and secrets.compare_digest(str(pwd), self.server_ctx.admin_password):
+            current = self.server_ctx.current_admin_password()[0]
+            if current and secrets.compare_digest(str(pwd), current):
                 token = create_admin_session()
                 return self._send_json({"success": True, "token": token})
             return self._send_json({"success": False, "error": "password incorrect"}, 403)
+
+        if path == "/api/admin/password":
+            # a local server's password, written into its config.ini [security]
+            try:
+                payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+            except Exception:
+                return self._send_json({"success": False, "error": "bad request"}, 400)
+            if not verify_admin_session(self._session_token(None, payload)):
+                return self._send_json({"success": False, "error": "unauthorized"}, 401)
+            if not self.server_ctx.can_change_admin_password():
+                return self._send_json({"success": False, "error": "密码由环境变量或公网服务器的配置决定，请在那里修改"}, 403)
+            current = self.server_ctx.current_admin_password()[0]
+            if not secrets.compare_digest(str(payload.get("old", "")), current):
+                return self._send_json({"success": False, "error": "原密码不正确"}, 403)
+            new = str(payload.get("new", ""))
+            why = check_new_password(new)
+            if why:
+                return self._send_json({"success": False, "error": why}, 400)
+            try:
+                write_admin_password(self.server_ctx.config_path, new)
+            except OSError as e:
+                return self._send_json({"success": False, "error": f"cannot write config.ini: {e}"}, 500)
+            self.server_ctx.admin_password = new
+            return self._send_json({"success": True})
 
         if path == "/api/admin/logout":
             try:
@@ -578,12 +608,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 class ProxyServer(http.server.ThreadingHTTPServer):
-    def __init__(self, server_address, master_key_1: bytes, admin_password: str, db_path: str = "minischeme_proxy.db", protocol_mode: str = "both", admin_login_delay: int = 0, public: bool = False):
+    def __init__(self, server_address, master_key_1: bytes, admin_password: str, db_path: str = "minischeme_proxy.db", protocol_mode: str = "both", admin_login_delay: int = 0, public: bool = False,
+                 config_path: str = ""):
         super().__init__(server_address, ProxyHandler)
         self.public = public   # on the internet: never fetches from private networks
         self.master_key_1 = master_key_1
-        self.admin_password = admin_password
+        self.admin_password = admin_password   # without config_path: fixed
+        self.config_path = config_path         # with it: read again at each login
         self.db = Database(db_path)
         self.recovery_challenges: dict = {}
         self.protocol_mode = (protocol_mode or "both").lower().strip()
         self.admin_login_delay = max(0, admin_login_delay or 0)
+
+    def current_admin_password(self) -> Tuple[str, str]:
+        """(password, source): from config.ini when the server has one (an edit
+        applies at the next login), else the password it was started with."""
+        if self.config_path:
+            return read_admin_password(self.config_path, self.public)
+        return self.admin_password, "fixed"
+
+    def can_change_admin_password(self) -> bool:
+        return can_change(self.config_path, self.public)

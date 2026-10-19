@@ -10,7 +10,7 @@ A high-performance application proxy, protocol converter, and device management 
   3. **Requests**: each request carries 16 random nonce bytes; `HKDF(salt = nonce, ikm = master_key_2, info = "msc1 request keys")` gives that request's own request and response keys. A nonce seen in the last 10 minutes is refused; the board's clock is not enforced (it may send time 0 before NTP).
   4. **What a device may ask**: the proxy's own `/app/...` and `/market/...` (answered in-process), or an internet `http(s)` URL (GET, fetched by the server; never a private or cloud-metadata address on a public server).
 - **Dual Deployment Modes**:
-  - `local`: Designed for home/LAN use. Prompts the user to set an admin password on first run.
+  - `local`: Designed for home/LAN use. Without `[security] admin_password` the admin password is `admin`; change it in the admin portal (written into config.ini) or in config.ini (read again at every login).
   - `public`: Designed for cloud servers. Requires admin password in configuration/env; refuses passwordless startup.
 - **SQLite Multi-Tenant Storage**:
   - Per-device isolated key-value store for app settings.

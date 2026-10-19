@@ -25,7 +25,7 @@ table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14p
 th, td { text-align: left; padding: 10px; border-bottom: 1px solid var(--border); }
 th { background: #f1f5f9; color: #475569; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 12px; background: #e0e7ff; color: #3730a3; }
-.hidden { display: none; }
+.hidden { display: none !important; }
 pre { background: #f1f5f9; padding: 10px; border-radius: 6px; font-size: 13px; overflow-x: auto; }
 </style>
 </head>
@@ -39,6 +39,7 @@ pre { background: #f1f5f9; padding: 10px; border-radius: 6px; font-size: 13px; o
       <input type="password" id="admin-pwd" placeholder="管理员主密码" style="flex:1;">
       <button onclick="doAdminLogin()">登录后台</button>
     </div>
+    <div id="login-hint" class="hidden" style="margin-top:10px; color:#94a3b8;">本地服务的默认密码是 admin，登录后请修改（也可以在 config.ini 的 [security] admin_password 里改）。</div>
     <div id="login-msg" style="margin-top:10px; color:#ef4444;"></div>
   </div>
 
@@ -47,8 +48,19 @@ pre { background: #f1f5f9; padding: 10px; border-radius: 6px; font-size: 13px; o
       <h2>全量设备与租户审计</h2>
       <div>
         <button onclick="showPresetModal()">预设用户数据</button>
+        <button id="pw-open" class="secondary hidden" onclick="showPasswordForm()">修改密码</button>
         <button class="secondary" onclick="doLogout()">退出</button>
       </div>
+    </div>
+    <div id="pw-warn" class="hidden" style="margin:10px 0; padding:10px; border:1px solid #f59e0b; border-radius:6px; color:#f59e0b;">
+      ⚠️ 仍在使用默认密码 admin，请点击"修改密码"换一个（至少 6 个字符）。
+    </div>
+    <div id="pw-form" class="hidden" style="margin:10px 0; display:flex; gap:10px; flex-wrap:wrap; max-width:640px;">
+      <input type="password" id="pw-old" placeholder="原密码" autocomplete="current-password" style="flex:1;">
+      <input type="password" id="pw-new" placeholder="新密码（至少 6 个字符）" autocomplete="new-password" style="flex:1;">
+      <input type="password" id="pw-new2" placeholder="再输一次新密码" autocomplete="new-password" style="flex:1;">
+      <button onclick="changePassword()">保存新密码</button>
+      <div id="pw-msg" style="width:100%;"></div>
     </div>
 
     <table id="device-table">
@@ -89,12 +101,57 @@ function showLogin() {
   document.getElementById('dashboard-section').classList.add('hidden');
 }
 
+let adminStatus = {};
+
 function showDashboard() {
   document.getElementById('login-section').classList.add('hidden');
   document.getElementById('dashboard-section').classList.remove('hidden');
+  // a local server: change the password here (it goes into config.ini)
+  document.getElementById('pw-open').classList.toggle('hidden', !adminStatus.can_change_password);
+  document.getElementById('pw-warn').classList.toggle('hidden', !adminStatus.default_password);
+}
+
+function showPasswordForm() {
+  document.getElementById('pw-form').classList.remove('hidden');
+  document.getElementById('pw-old').focus();
+}
+
+async function changePassword() {
+  const old = document.getElementById('pw-old').value, nw = document.getElementById('pw-new').value;
+  const msg = document.getElementById('pw-msg');
+  if (nw !== document.getElementById('pw-new2').value) {
+    msg.style.color = '#ef4444';
+    msg.innerText = '两次输入的新密码不一样';
+    return;
+  }
+  try {
+    const r = await fetch('/api/admin/password', {
+      method: 'POST',
+      headers: authHeaders({'Content-Type': 'application/json'}),
+      body: JSON.stringify({ token: adminToken, old: old, new: nw })
+    });
+    const d = await r.json();
+    if (d.success) {
+      msg.style.color = '#10b981';
+      msg.innerText = '✔ 新密码已保存到 config.ini，下次登录生效';
+      ['pw-old', 'pw-new', 'pw-new2'].forEach(id => { document.getElementById(id).value = ''; });
+      adminStatus.default_password = false;
+      document.getElementById('pw-warn').classList.add('hidden');
+    } else {
+      msg.style.color = '#ef4444';
+      msg.innerText = d.error || '保存失败';
+    }
+  } catch (e) {
+    msg.style.color = '#ef4444';
+    msg.innerText = '请求失败: ' + e;
+  }
 }
 
 async function initAdminPortal() {
+  try {
+    adminStatus = await (await fetch('/api/admin/status')).json();
+  } catch (e) {}
+  document.getElementById('login-hint').classList.toggle('hidden', !adminStatus.default_password);
   if (adminToken) {
     const ok = await loadDevices();
     if (ok) {
@@ -105,19 +162,6 @@ async function initAdminPortal() {
       localStorage.removeItem('minischeme_admin_token');
     }
   }
-
-  // Check if server is local and allows passwordless login
-  try {
-    const r = await fetch('/api/admin/status');
-    const d = await r.json();
-    if (d.success && !d.auth_required && d.token) {
-      adminToken = d.token;
-      localStorage.setItem('minischeme_admin_token', adminToken);
-      showDashboard();
-      await loadDevices();
-      return;
-    }
-  } catch (e) {}
 
   showLogin();
 }

@@ -9,6 +9,8 @@ htmlcov/
 
 # Local databases and runtime configs
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
 *.log
 config.ini

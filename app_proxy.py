@@ -7,11 +7,11 @@ Usage:
 
 import argparse
 import configparser
-import getpass
 import os
 import secrets
 import sys
 
+from proxy.admin_password import DEFAULT_LOCAL_PASSWORD, write_ini_value
 from proxy.server import ProxyServer
 
 
@@ -34,11 +34,7 @@ def main():
     master_key_1_hex = os.getenv("MINISCHEME_MASTER_KEY_1") or cfg.get("security", "master_key_1", fallback="")
     if not master_key_1_hex:
         master_key_1 = secrets.token_bytes(32)
-        if not cfg.has_section("security"):
-            cfg.add_section("security")
-        cfg.set("security", "master_key_1", master_key_1.hex())
-        with open(args.config, "w", encoding="utf-8") as f:
-            cfg.write(f)
+        write_ini_value(args.config, "security", "master_key_1", master_key_1.hex())   # comments kept
         print(f"[*] Generated new master_key_1 and saved to {args.config}")
     else:
         master_key_1 = bytes.fromhex(master_key_1_hex)
@@ -53,23 +49,11 @@ def main():
             sys.exit(1)
     else:  # local mode
         if not admin_password:
-            print("=" * 60)
-            print(" MiniScheme Local Proxy - First Launch Wizard")
-            print("=" * 60)
-            if sys.stdin.isatty():
-                pwd = getpass.getpass("Please set an Administrator password for this local instance: ").strip()
-                while not pwd:
-                    pwd = getpass.getpass("Password cannot be empty. Please enter: ").strip()
-            else:
-                pwd = secrets.token_urlsafe(12)
-                print(f"[*] Non-interactive environment: auto-generated admin password: {pwd}")
-            admin_password = pwd
-            if not cfg.has_section("security"):
-                cfg.add_section("security")
-            cfg.set("security", "admin_password", admin_password)
-            with open(args.config, "w", encoding="utf-8") as f:
-                cfg.write(f)
-            print(f"[*] Admin password saved to {args.config}")
+            # no prompt: the default, changed in the admin portal or in config.ini
+            # [security] admin_password (read again at every login)
+            admin_password = DEFAULT_LOCAL_PASSWORD
+            print(f"[*] Admin portal password: the default '{DEFAULT_LOCAL_PASSWORD}'. Change it in the portal "
+                  f"(/admin) or in {args.config} [security] admin_password.")
 
     db_path = cfg.get("server", "db_path", fallback=args.db)
 
@@ -107,7 +91,7 @@ def main():
     print("=" * 60)
 
     server = ProxyServer((args.host, args.port), master_key_1, admin_password, db_path=db_path, protocol_mode=proto_mode, admin_login_delay=login_delay,
-                         public=args.mode == "public")
+                         public=args.mode == "public", config_path=os.path.abspath(args.config))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

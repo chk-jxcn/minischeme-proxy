@@ -27,6 +27,12 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
+from proxy.admin_password import (
+    can_change as admin_password_can_change,
+    check_new_password,
+    read_admin_password,
+    write_admin_password,
+)
 from proxy.security import (
     FetchRefused,
     client_ip as _trusted_client_ip,
@@ -289,7 +295,7 @@ class IntegratedProxyContext:
     def __init__(self):
         self.db = None
         self.master_key_1 = None
-        self.admin_password = ""   # none set: the admin portal is open to this machine only
+        self.admin_password = ""   # read again at each login: current_admin_password()
         self.admin_login_delay = 0
         self.recovery_challenges = {}
         self._lock = threading.Lock()
@@ -314,16 +320,38 @@ class IntegratedProxyContext:
                     self.master_key_1 = bytes.fromhex(mk1_hex)
                 else:
                     self.master_key_1 = secrets.token_bytes(32)
-                self.admin_password = (
-                    os.getenv("MINISCHEME_ADMIN_PASSWORD")
-                    or cfg.get("security", "admin_password", fallback="")
-                    or ""
-                )
+                self.admin_password = current_admin_password()[0]
                 self.admin_login_delay = server_config.admin_login_delay
                 db_path = os.path.join(DATA_DIR, "minischeme_proxy.db")
                 self.db = Database(db_path)
             except Exception as e:
                 print(f"[Warn] Proxy DB init fallback: {e}")
+
+
+def password_deployment_public():
+    """The proxy-only service (tools/deploy_public_proxy.py) has no default
+    password and keeps it in its own config.ini; the local service (WebREPL
+    included) has the default "admin", whatever protocol it speaks."""
+    return "webrepl" not in server_config.components
+
+
+def current_admin_password():
+    """(password, source) from the environment or config.ini, read now: a
+    local service without one uses the default "admin" (proxy/admin_password.py)."""
+    return read_admin_password(server_config.config_file, password_deployment_public())
+
+
+def ensure_config_file():
+    """config.ini exists (the tray opens it for editing); its path."""
+    path = server_config.config_file
+    if not os.path.exists(path):
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8", newline="\n") as f:
+            f.write("; MiniScheme local service settings (read at start; admin_password at every login)\n"
+                    "[security]\n"
+                    "; admin portal password; empty: the default \"admin\" (change it here or in the portal)\n"
+                    "admin_password =\n")
+    return path
 
 
 proxy_ctx = IntegratedProxyContext()
@@ -760,18 +788,14 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 return self._json_reply({"success": True, "items": proxy_ctx.db.get_app_data(mac, masked=True)})
             if req_path == "/api/admin/status":
-                mode = server_config.protocol_mode
-                # without a configured password only this machine's own
-                # browser gets in (the tray menu), never a page of another origin
-                from proxy.security import is_loopback_host
-                origin = self.headers.get("Origin", "")
-                own_page = not origin or is_loopback_host(urllib.parse.urlparse(origin).hostname or "")
-                auth_req = bool(proxy_ctx.admin_password) or server_config.is_public() or not (
-                    is_loopback_host(self._get_client_ip()) and own_page)
-                resp = {"success": True, "auth_required": auth_req, "protocol_mode": mode}
-                if not auth_req:
-                    resp["token"] = create_admin_session()
-                return self._json_reply(resp)
+                # a local server always has a password (by default "admin"):
+                # the portal asks for it and says when the default is still in use
+                pwd, source = current_admin_password()
+                return self._json_reply({
+                    "success": True, "auth_required": True, "protocol_mode": server_config.protocol_mode,
+                    "default_password": source == "default",
+                    "can_change_password": admin_password_can_change(server_config.config_file, password_deployment_public()),
+                })
             if req_path == "/api/admin/devices":
                 token = self._session_token(qs)
                 if not verify_admin_session(token):
@@ -898,10 +922,31 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 if server_config.admin_login_delay > 0:
                     time.sleep(server_config.admin_login_delay)
                 pwd = payload.get("password", "")
-                if proxy_ctx.admin_password and secrets.compare_digest(str(pwd), proxy_ctx.admin_password):
+                current = current_admin_password()[0]
+                if current and secrets.compare_digest(str(pwd), current):
                     token = create_admin_session()
                     return self._json_reply({"success": True, "token": token})
                 return self._json_reply({"success": False, "error": "password incorrect"}, 403)
+
+            if req_path == "/api/admin/password":
+                # a local server's password, written into config.ini [security]
+                token = self._session_token(None, payload)
+                if not verify_admin_session(token):
+                    return self._json_reply({"success": False, "error": "unauthorized"}, 401)
+                if not admin_password_can_change(server_config.config_file, password_deployment_public()):
+                    return self._json_reply({"success": False, "error": "密码由环境变量或公网服务器的配置决定，请在那里修改"}, 403)
+                current = current_admin_password()[0]
+                if not secrets.compare_digest(str(payload.get("old", "")), current):
+                    return self._json_reply({"success": False, "error": "原密码不正确"}, 403)
+                new = str(payload.get("new", ""))
+                why = check_new_password(new)
+                if why:
+                    return self._json_reply({"success": False, "error": why}, 400)
+                try:
+                    write_admin_password(server_config.config_file, new)
+                except OSError as e:
+                    return self._json_reply({"success": False, "error": f"cannot write config.ini: {e}"}, 500)
+                return self._json_reply({"success": True})
 
             if req_path == "/api/admin/logout":
                 token = self._session_token(None, payload)
@@ -1217,6 +1262,7 @@ class Win32SystemTray:
         ID_CHECK_RELEASE = 1005
         ID_OPEN_ADMIN = 1006
         ID_OPEN_USER = 1007
+        ID_OPEN_CONFIG = 1008
 
         LRESULT = ctypes.c_ssize_t
         WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
@@ -1268,6 +1314,7 @@ class Win32SystemTray:
             user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(hmenu, MF_STRING, ID_OPEN_LAN, f"📡 本机 IP: {self.ip}  |  监听端口: {self.port}")
             user32.AppendMenuW(hmenu, MF_STRING, ID_COPY_PROXY, f"📋 复制局域网代理地址 ({lan_url})")
+            user32.AppendMenuW(hmenu, MF_STRING, ID_OPEN_CONFIG, "📝 打开配置文件 (config.ini)")
             user32.AppendMenuW(hmenu, MF_STRING, ID_CHECK_RELEASE, "🔄 检查并下载最新 Release 版本")
             user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(hmenu, MF_STRING, ID_EXIT, "❌ 退出 MiniScheme 本地服务")
@@ -1289,6 +1336,11 @@ class Win32SystemTray:
                 webbrowser.open(lan_url)
             elif cmd == ID_COPY_PROXY:
                 self._copy_to_clipboard(lan_url)
+            elif cmd == ID_OPEN_CONFIG:
+                try:
+                    os.startfile(ensure_config_file())   # the editor registered for .ini
+                except OSError as e:
+                    print(f"[Warn] Cannot open the config file: {e}")
             elif cmd == ID_CHECK_RELEASE:
                 rel = get_latest_github_release("minischeme-webrepl")
                 exe_asset = (rel.get("assets") or {}).get("MiniScheme-WebREPL.exe")

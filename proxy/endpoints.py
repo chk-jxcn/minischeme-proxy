@@ -20,6 +20,7 @@ import math
 import os
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Dict, Any, List, Optional
@@ -1024,61 +1025,132 @@ def _crypto_json(url: str) -> Any:
         return json.loads(resp.read().decode("utf-8"))
 
 
+# Market sources in order. A server in mainland China reaches neither OKX nor
+# Huobi, but Binance's public market-data host (data-api.binance.vision)
+# answers there. A source that failed is skipped for a while, so a request
+# does not wait for its timeout again and again.
+CRYPTO_SOURCE_RETRY = 300
+_crypto_source_down: Dict[str, float] = {}
+
+
+def _crypto_source_ok(name: str) -> bool:
+    return _crypto_source_down.get(name, 0) <= time.time()
+
+
+def _crypto_source_failed(name: str):
+    _crypto_source_down[name] = time.time() + CRYPTO_SOURCE_RETRY
+
+
+def _ticker_okx(sym: str) -> Optional[Dict[str, Any]]:
+    rows = _crypto_json(f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT").get("data") or []
+    r = rows[0] if rows else {}
+    last = _safe_float(r.get("last"))
+    if last <= 0:
+        return None
+    return {"price": last, "open": _safe_float(r.get("open24h")), "high": _safe_float(r.get("high24h")),
+            "low": _safe_float(r.get("low24h")), "vol": _safe_float(r.get("volCcy24h"))}
+
+
+def _ticker_binance(sym: str) -> Optional[Dict[str, Any]]:
+    r = _crypto_json(f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT")
+    last = _safe_float(r.get("lastPrice")) if isinstance(r, dict) else 0.0
+    if last <= 0:
+        return None
+    return {"price": last, "open": _safe_float(r.get("openPrice")), "high": _safe_float(r.get("highPrice")),
+            "low": _safe_float(r.get("lowPrice")), "vol": _safe_float(r.get("quoteVolume"))}
+
+
+def _ticker_huobi(sym: str) -> Optional[Dict[str, Any]]:
+    t = _crypto_json(f"https://api.huobi.pro/market/detail/merged?symbol={sym.lower()}usdt").get("tick") or {}
+    last = _safe_float(t.get("close"))
+    if last <= 0:
+        return None
+    return {"price": last, "open": _safe_float(t.get("open")), "high": _safe_float(t.get("high")),
+            "low": _safe_float(t.get("low")), "vol": _safe_float(t.get("vol"))}
+
+
+def _closes_okx(sym: str, bar: str, limit: int) -> List[float]:
+    rows = _crypto_json(f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar={bar}&limit={limit}"
+                        ).get("data") or []
+    return [_safe_float(r[4]) for r in reversed(rows) if len(r) > 4 and _safe_float(r[4]) > 0]
+
+
+def _closes_binance(sym: str, bar: str, limit: int) -> List[float]:
+    interval = "1h" if bar == "1H" else "1d"
+    rows = _crypto_json(f"https://data-api.binance.vision/api/v3/klines?symbol={sym}USDT"
+                        f"&interval={interval}&limit={limit}")
+    return [_safe_float(r[4]) for r in rows if isinstance(r, list) and len(r) > 4 and _safe_float(r[4]) > 0]
+
+
+def _closes_huobi(sym: str, bar: str, limit: int) -> List[float]:
+    period = "60min" if bar == "1H" else "1day"
+    rows = _crypto_json(f"https://api.huobi.pro/market/history/kline?symbol={sym.lower()}usdt"
+                        f"&period={period}&size={limit}").get("data") or []
+    return [_safe_float(r.get("close")) for r in reversed(rows) if _safe_float(r.get("close")) > 0]
+
+
+CRYPTO_SOURCES = [("okx", _ticker_okx, _closes_okx),
+                  ("binance", _ticker_binance, _closes_binance),
+                  ("huobi", _ticker_huobi, _closes_huobi)]
+
+
+def _source_call(name: str, fn, *args):
+    """fn(*args) of a source, or None when it fails (the source is then rested)."""
+    try:
+        return fn(*args)
+    except urllib.error.HTTPError:
+        return None   # the host answered (e.g. an unknown symbol): not down
+    except Exception:
+        _crypto_source_failed(name)
+        return None
+
+
 def fetch_live_crypto_ticker(sym: str) -> Optional[Dict[str, Any]]:
-    """SYM-USDT over 24 h from OKX, else Huobi: {price, open, high, low, vol (USDT)}, or None."""
-    try:
-        rows = _crypto_json(f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT").get("data") or []
-        if rows:
-            r = rows[0]
-            last = _safe_float(r.get("last"))
-            if last > 0:
-                return {"price": last, "open": _safe_float(r.get("open24h")), "high": _safe_float(r.get("high24h")),
-                        "low": _safe_float(r.get("low24h")), "vol": _safe_float(r.get("volCcy24h"))}
-    except Exception:
-        pass
-    try:
-        t = _crypto_json(f"https://api.huobi.pro/market/detail/merged?symbol={sym.lower()}usdt").get("tick") or {}
-        last = _safe_float(t.get("close"))
-        if last > 0:
-            return {"price": last, "open": _safe_float(t.get("open")), "high": _safe_float(t.get("high")),
-                    "low": _safe_float(t.get("low")), "vol": _safe_float(t.get("vol"))}
-    except Exception:
-        pass
+    """SYM-USDT over 24 h from the first source that answers: {price, open, high, low, vol (USDT)}, or None."""
+    for name, ticker, _ in CRYPTO_SOURCES:
+        if _crypto_source_ok(name):
+            res = _source_call(name, ticker, sym)
+            if res:
+                return res
     return None
 
 
 def fetch_crypto_closes(sym: str, bar: str, limit: int) -> List[float]:
-    """Closing prices of SYM-USDT, oldest first (bar "1H" or "1D"), OKX else Huobi; [] when none."""
-    try:
-        rows = _crypto_json(f"https://www.okx.com/api/v5/market/candles?instId={sym}-USDT&bar={bar}&limit={limit}"
-                            ).get("data") or []
-        closes = [_safe_float(r[4]) for r in reversed(rows) if len(r) > 4 and _safe_float(r[4]) > 0]
-        if len(closes) >= 2:
-            return closes
-    except Exception:
-        pass
-    try:
-        period = "60min" if bar == "1H" else "1day"
-        rows = _crypto_json(f"https://api.huobi.pro/market/history/kline?symbol={sym.lower()}usdt"
-                            f"&period={period}&size={limit}").get("data") or []
-        return [_safe_float(r.get("close")) for r in reversed(rows) if _safe_float(r.get("close")) > 0]
-    except Exception:
-        return []
+    """Closing prices of SYM-USDT, oldest first (bar "1H" or "1D"); [] when no source has them."""
+    for name, _, closes in CRYPTO_SOURCES:
+        if _crypto_source_ok(name):
+            res = _source_call(name, closes, sym, bar, limit)
+            if res and len(res) >= 2:
+                return res
+    return []
 
 
 def fetch_usd_cny() -> Optional[float]:
-    """USD/CNY (OKX's rate), cached for an hour; None when unavailable."""
+    """USD/CNY (OKX's rate, else Sina's onshore quote), cached for an hour; None when unavailable."""
     hit = cache.get("crypto:usdcny")
     if hit:
         return hit
-    try:
-        rows = _crypto_json("https://www.okx.com/api/v5/market/exchange-rate").get("data") or [{}]
-        rate = _safe_float(rows[0].get("usdCny"))
-        if rate > 0:
-            cache.set("crypto:usdcny", rate, ttl_seconds=3600)
-            return rate
-    except Exception:
-        pass
+    rate = 0.0
+    if _crypto_source_ok("okx"):
+        try:
+            rows = _crypto_json("https://www.okx.com/api/v5/market/exchange-rate").get("data") or [{}]
+            rate = _safe_float(rows[0].get("usdCny"))
+        except Exception:
+            _crypto_source_failed("okx")
+    if rate <= 0:
+        try:
+            req = urllib.request.Request("https://hq.sinajs.cn/list=fx_susdcny", headers=SINA_HEADERS)
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                text = resp.read().decode("gbk", "replace")
+            fields = text.split('"')[1].split(",") if '"' in text else []
+            # time, buy, sell, previous close, ..., latest (index 8)
+            rate = _safe_float(fields[8]) if len(fields) > 8 else 0.0
+            rate = rate or (_safe_float(fields[1]) if len(fields) > 1 else 0.0)
+        except Exception:
+            rate = 0.0
+    if rate > 0:
+        cache.set("crypto:usdcny", rate, ttl_seconds=3600)
+        return rate
     return None
 
 
@@ -1133,7 +1205,7 @@ def make_crypto_kline_item(sym: str, rate: float) -> Optional[Dict[str, str]]:
 
 def get_crypto(view: str = "home", symbols: str = "BTC,ETH,SOL", chart: str = "", fiat: str = "usd") -> Dict[str, Any]:
     """Cryptocurrency quotes, the chart coin's 24 h trend and daily klines,
-    live from OKX (Huobi as a fallback). Only real market data: a coin no
+    live from OKX, Binance (data-api.binance.vision) or Huobi. Only real market data: a coin no
     source answers for is left out, and when nothing answers the last good
     answer is served (with its own update time) or CryptoUnavailable raised.
 
@@ -1166,7 +1238,7 @@ def get_crypto(view: str = "home", symbols: str = "BTC,ETH,SOL", chart: str = ""
                 if res:
                     info_map[futs[f]] = res
         if not info_map:
-            raise CryptoUnavailable("no market source answered (OKX, Huobi)")
+            raise CryptoUnavailable("no market source answered (OKX, Binance, Huobi)")
 
         items: List[Dict[str, str]] = [
             {"t": "meta", "a": "人民币" if is_cny else "USDT", "b": f"{rate:.4f}" if is_cny else "1"}

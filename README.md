@@ -25,7 +25,7 @@ A high-performance application proxy, protocol converter, and device management 
   - `X-Forwarded-For` is trusted only from a reverse proxy on the same machine.
   - Secret query values (`token`, `key`, ...) are masked in logs and the access log; the database file is mode 0600.
   - The server's own QWeather key (`[qweather]` in config.ini, or `MINISCHEME_QWEATHER_KEY`) is used only for devices without a token and only with QWeather hosts.
-- **Real data only**: market endpoints never invent values; e.g. `/app/crypto` (OKX, Huobi as a fallback) answers 502 when no source responds, and the board keeps its last data.
+- **Real data only**: market endpoints never invent values; e.g. `/app/crypto` takes the first of OKX, Binance (`data-api.binance.vision`, reachable from mainland China) and Huobi that answers (a failing source is skipped for 5 minutes), USD/CNY from OKX or Sina, and answers 502 when no source responds, so the board keeps its last data.
 
 ## Installation & Running
 

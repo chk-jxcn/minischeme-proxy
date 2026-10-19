@@ -86,19 +86,18 @@ def aes_gcm_encrypt(key: bytes, nonce: bytes, plaintext: bytes, associated_data:
     """Encrypt using AES-256-GCM. Returns ciphertext + 16-byte auth tag."""
     if not HAS_CRYPTOGRAPHY:
         raise RuntimeError("cryptography library required for AES-GCM operations")
-    aesgcm = AESGCM(key)
-    # GCM standard 12-byte nonce
-    gcm_nonce = nonce[:12] if len(nonce) >= 12 else nonce.ljust(12, b"\x00")
-    return aesgcm.encrypt(gcm_nonce, plaintext, associated_data)
+    if len(nonce) != 12:
+        raise ValueError("AES-GCM nonce must be 12 bytes")
+    return AESGCM(key).encrypt(nonce, plaintext, associated_data)
 
 
 def aes_gcm_decrypt(key: bytes, nonce: bytes, ciphertext_and_tag: bytes, associated_data: bytes = b"") -> bytes:
     """Decrypt using AES-256-GCM. Verifies auth tag."""
     if not HAS_CRYPTOGRAPHY:
         raise RuntimeError("cryptography library required for AES-GCM operations")
-    aesgcm = AESGCM(key)
-    gcm_nonce = nonce[:12] if len(nonce) >= 12 else nonce.ljust(12, b"\x00")
-    return aesgcm.decrypt(gcm_nonce, ciphertext_and_tag, associated_data)
+    if len(nonce) != 12:
+        raise ValueError("AES-GCM nonce must be 12 bytes")
+    return AESGCM(key).decrypt(nonce, ciphertext_and_tag, associated_data)
 
 
 def pack_channel_response(k_resp: bytes, status: int, body: bytes) -> bytes:

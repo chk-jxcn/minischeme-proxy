@@ -3,7 +3,8 @@
 Deploy and synchronize MiniScheme App Proxy & Protocol Converter to remote public server.
 Remote Server: root@124.222.231.186
 Port: 8087
-Mode: --proxy-only --protocol encrypted --admin-login-delay 5
+Mode: --proxy-only --protocol both --admin-login-delay 5 (plaintext /app/* for the
+      online WebREPL simulator, MSC1 /channel for devices)
 Service Name: minischeme-proxy.service
 Config File: /opt/minischeme-proxy/config.ini
 """
@@ -113,33 +114,7 @@ def deploy():
     cfg_check = run_ssh(f"if [ -f '{CONFIG_PATH}' ]; then echo 'EXISTS'; else echo 'NEW'; fi").strip()
 
     if "EXISTS" in cfg_check:
-        print("      Existing config.ini found on server. Preserving current admin credentials...")
-        # Ensure security and server settings are enforced
-        py_patch = (
-            f"python3 -c \""
-            f"import configparser\n"
-            f"cfg = configparser.ConfigParser()\n"
-            f"cfg.read('{CONFIG_PATH}')\n"
-            f"if not cfg.has_section('server'): cfg.add_section('server')\n"
-            f"if not cfg.has_section('security'): cfg.add_section('security')\n"
-            f"if not cfg.has_section('qweather'): cfg.add_section('qweather')\n"
-            f"cfg.set('server', 'protocol_mode', 'both')\n"
-            f"cfg.set('server', 'components', 'proxy,channel,portal')\n"
-            f"cfg.set('security', 'admin_login_delay', '5')\n"
-            f"if not cfg.get('qweather', 'key', fallback=''):\n"
-            f"    cfg.set('qweather', 'key', 'f303e9850b6a4a368d7d76f9d27589e3')\n"
-            f"if not cfg.get('qweather', 'host', fallback=''):\n"
-            f"    cfg.set('qweather', 'host', 'nb7jpkge2v.re.qweatherapi.com')\n"
-            f"if not cfg.get('security', 'admin_password', fallback=''):\n"
-            f"    import secrets, string\n"
-            f"    cfg.set('security', 'admin_password', ''.join(secrets.choice(string.ascii_letters) for _ in range(10)))\n"
-            f"if not cfg.get('security', 'master_key_1', fallback=''):\n"
-            f"    import secrets\n"
-            f"    cfg.set('security', 'master_key_1', secrets.token_bytes(32).hex())\n"
-            f"with open('{CONFIG_PATH}', 'w') as f: cfg.write(f)\n"
-            f"\""
-        )
-        run_ssh(py_patch)
+        print("      Existing config.ini found on server. Preserving without modification.")
     else:
         print("      Generating new configuration with 10-letter pure letters admin password...")
         new_pwd = generate_10_letter_password()
@@ -153,8 +128,9 @@ def deploy():
             "admin_login_delay = 5\n"
             f"master_key_1 = {mk1}\n\n"
             "[qweather]\n"
-            "key = f303e9850b6a4a368d7d76f9d27589e3\n"
-            "host = nb7jpkge2v.re.qweatherapi.com\n"
+            "; the server's own QWeather credentials for devices without a token: set by hand\n"
+            "key =\n"
+            "host =\n"
         )
         run_ssh(f"cat << 'EOF' > '{CONFIG_PATH}'\n{cfg_content}\nEOF\nchmod 600 '{CONFIG_PATH}'")
         print(f"      [OK] config.ini written to {CONFIG_PATH} (chmod 600)")
@@ -204,7 +180,7 @@ WantedBy=multi-user.target
     print(f"  Remote Server:       {REMOTE_HOST}:{REMOTE_PORT}")
     print(f"  Service Name:        {SERVICE_NAME}.service")
     print(f"  Config File Path:    {CONFIG_PATH}")
-    print(f"  Protocol Policy:     Strict Encrypted Only (MSC1 channel)")
+    print(f"  Protocol Policy:     both (plaintext /app/* and MSC1 /channel)")
     print(f"  Admin Login Delay:   5 seconds")
     print(f"  Web Portals:         http://{REMOTE_HOST}:{REMOTE_PORT}/admin")
     print(f"                       http://{REMOTE_HOST}:{REMOTE_PORT}/user")
@@ -233,6 +209,12 @@ def test_endpoints():
         mkt_list = json.loads(out_mkt)
         assert isinstance(mkt_list, list) and len(mkt_list) >= 13, f"Unexpected /market/index.json: {len(mkt_list)}"
         print(f"      [OK] /market/index.json returned 200 OK ({len(mkt_list)} apps)")
+
+    # B3. Market paths stay inside apps/ (path traversal answered 404)
+    for probe in ("/market/../config.ini", "/market/%2e%2e/config.ini", "/market/..%2fminischeme_proxy.db"):
+        code = run_ssh(f"curl -s --path-as-is -o /dev/null -w '%{{http_code}}' 'http://127.0.0.1:{REMOTE_PORT}{probe}'").strip()
+        assert code == "404", f"{probe}: expected 404, got {code}"
+    print("      [OK] /market path traversal refused")
 
     # C. Static WebREPL files should return 404 in proxy-only mode
     out_root = run_ssh(f"curl -s -o /dev/null -w '%{{http_code}}' http://127.0.0.1:{REMOTE_PORT}/")

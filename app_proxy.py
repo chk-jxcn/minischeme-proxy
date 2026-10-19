@@ -106,7 +106,8 @@ def main():
     print(f" Admin Portal:  http://{args.host}:{args.port}/admin")
     print("=" * 60)
 
-    server = ProxyServer((args.host, args.port), master_key_1, admin_password, db_path=db_path, protocol_mode=proto_mode, admin_login_delay=login_delay)
+    server = ProxyServer((args.host, args.port), master_key_1, admin_password, db_path=db_path, protocol_mode=proto_mode, admin_login_delay=login_delay,
+                         public=args.mode == "public")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -38,6 +38,9 @@ class Database:
             if parent_dir:
                 os.makedirs(parent_dir, exist_ok=True)
             self._shared_conn = None
+            if not os.path.exists(self.db_path):
+                # Device secrets live here: readable by the service only.
+                os.close(os.open(self.db_path, os.O_CREAT | os.O_WRONLY, 0o600))
         else:
             self.db_path = ":memory:"
             self._shared_conn = sqlite3.connect(":memory:", check_same_thread=False)
@@ -105,22 +108,27 @@ class Database:
                 )
             """)
             conn.commit()
+        if self.db_path != ":memory:" and os.name != "nt":
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.chmod(self.db_path + suffix, 0o600)
+                except OSError:
+                    pass
 
     def register_device(self, mac: str, hw_hash_key: bytes, master_key_2: bytes, ip: str = "") -> bool:
+        """Add a new device; False (nothing changed) when the id is already registered.
+
+        An existing device's keys are never replaced here: only a device that
+        proved its hardware hash key may get its keys back (see /channel/auth)."""
         clean_mac = normalize_device_id(mac)
         now = int(time.time())
         with self._get_conn() as conn:
-            conn.execute("""
-                INSERT INTO devices (mac, hardware_hash_key, master_key_2, created_at, last_seen_at, last_ip, status)
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO devices (mac, hardware_hash_key, master_key_2, created_at, last_seen_at, last_ip, status)
                 VALUES (?, ?, ?, ?, ?, ?, 'active')
-                ON CONFLICT(mac) DO UPDATE SET
-                    hardware_hash_key=excluded.hardware_hash_key,
-                    master_key_2=excluded.master_key_2,
-                    last_seen_at=excluded.last_seen_at,
-                    last_ip=excluded.last_ip
             """, (clean_mac, hw_hash_key, master_key_2, now, now, ip))
             conn.commit()
-            return True
+            return cur.rowcount == 1
 
     def register_simulator(self, sim_id: str, ip: str = "") -> bool:
         clean_id = normalize_device_id(sim_id)
@@ -154,8 +162,10 @@ class Database:
             conn.commit()
 
     def log_access(self, mac: str, ip: str, method: str, endpoint: str, status_code: int, bytes_transferred: int):
+        from .security import redact_url
         clean_mac = normalize_device_id(mac)
         now = int(time.time())
+        endpoint = redact_url(endpoint)[:512]
         with self._get_conn() as conn:
             conn.execute("""
                 INSERT INTO access_logs (mac, ip, method, endpoint, status_code, bytes_transferred, timestamp)

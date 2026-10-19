@@ -6,23 +6,22 @@ import http.server
 import json
 import os
 import secrets
-import struct
 import time
 import urllib.parse
-from typing import Optional, Tuple
+from typing import Tuple
 
-from .crypto import (
-    derive_hardware_hash_key,
-    derive_master_key_2,
-    derive_request_keys,
-    verify_challenge_response,
-    aes_gcm_encrypt,
-    aes_gcm_decrypt,
-    pack_channel_response,
-    HAS_CRYPTOGRAPHY
-)
+from .channel import ChannelError, answer, open_request, register_device, seal
+from .crypto import derive_master_key_2, verify_challenge_response
 from .database import Database
-from .endpoints import get_weather, get_stocks, get_crypto, get_news, get_futures, handle_app_query
+from .endpoints import handle_app_query
+from .security import (
+    FetchRefused,
+    client_ip as trusted_client_ip,
+    cors_origin,
+    guarded_fetch,
+    is_private_host,
+    safe_join,
+)
 from .user_portal import (
     USER_HTML,
     generate_user_nonce,
@@ -37,8 +36,6 @@ from .admin_portal import (
     verify_admin_session,
     remove_admin_session,
 )
-
-CHANNEL_SKEW_SECONDS = 300  # ±5 minutes anti-replay window
 
 
 class ProxyHandler(http.server.BaseHTTPRequestHandler):
@@ -71,9 +68,16 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def send_header(self, keyword, value):
-        # Prevent duplicate CORS headers that violate browser CORS policies (e.g. multiple "*, *")
+        # CORS goes only to allowed origins (cors_origin): the value a handler
+        # asks for is replaced by the request's own origin, or dropped
         k_lower = keyword.lower()
         if k_lower in ("access-control-allow-origin", "access-control-allow-private-network"):
+            allowed = cors_origin(self.headers.get("Origin", ""), self.headers.get("Host", ""),
+                                  urllib.parse.urlparse(self.path).path)
+            if allowed is None:
+                return
+            if k_lower == "access-control-allow-origin":
+                value = allowed
             prefix = f"{k_lower}:".encode("latin-1")
             if hasattr(self, "_headers_buffer") and any(
                 h.lower().startswith(prefix) for h in self._headers_buffer
@@ -132,7 +136,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/user/data":
             mac = qs.get("mac", [""])[0]
-            token = qs.get("token", [""])[0]
+            token = self._session_token(qs)
             if not check_user_session(token, mac):
                 return self._send_json({"success": False, "error": "unauthorized"}, 401)
             items = self.server_ctx.db.get_app_data(mac, masked=True)
@@ -140,7 +144,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/user/logs":
             mac = qs.get("mac", [""])[0]
-            token = qs.get("token", [""])[0]
+            token = self._session_token(qs)
             if not check_user_session(token, mac):
                 return self._send_json({"success": False, "error": "unauthorized"}, 401)
             items = self.server_ctx.db.get_device_logs(mac)
@@ -148,23 +152,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
         # Admin API
         if path == "/api/admin/status":
+            # app_proxy.py always has an admin password: the portal asks for it
             mode = getattr(self.server_ctx, "protocol_mode", "both")
-            pwd = getattr(self.server_ctx, "admin_password", "admin")
-            auth_req = (mode == "encrypted" or pwd != "admin")
-            resp = {"success": True, "auth_required": auth_req, "protocol_mode": mode}
-            if not auth_req:
-                resp["token"] = create_admin_session()
-            return self._send_json(resp)
+            return self._send_json({"success": True, "auth_required": True, "protocol_mode": mode})
 
         if path == "/api/admin/devices":
-            token = qs.get("token", [""])[0]
+            token = self._session_token(qs)
             if not verify_admin_session(token):
                 return self._send_json({"success": False, "error": "unauthorized"}, 401)
             devs = self.server_ctx.db.admin_list_devices()
             return self._send_json({"success": True, "devices": devs})
 
         if path == "/api/admin/device/data":
-            token = qs.get("token", [""])[0]
+            token = self._session_token(qs)
             mac = qs.get("mac", [""])[0]
             if not verify_admin_session(token):
                 return self._send_json({"success": False, "error": "unauthorized"}, 401)
@@ -189,23 +189,22 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return
 
     def _get_client_ip(self) -> str:
-        xff = self.headers.get("X-Forwarded-For")
-        if xff:
-            ip = xff.split(",")[0].strip()
-            if ":" in ip and not ip.startswith("[") and ip.count(":") == 1:
-                ip = ip.split(":")[0].strip()
-            if ip:
-                return ip
-        x_real = self.headers.get("X-Real-IP")
-        if x_real:
-            ip = x_real.strip()
-            if ":" in ip and not ip.startswith("[") and ip.count(":") == 1:
-                ip = ip.split(":")[0].strip()
-            if ip:
-                return ip
-        if hasattr(self, "client_address") and self.client_address:
-            return str(self.client_address[0]).strip()
-        return ""
+        peer = str(self.client_address[0]) if getattr(self, "client_address", None) else ""
+        return trusted_client_ip(peer, self.headers)
+
+    def _session_token(self, qs=None, payload=None) -> str:
+        """The portal session token: X-Session-Token header (or the older
+        token= query / JSON field)."""
+        tok = self.headers.get("X-Session-Token", "")
+        if not tok and payload:
+            tok = payload.get("token", "") or ""
+        if not tok and qs:
+            tok = (qs.get("token") or [""])[0]
+        return tok
+
+    def _allow_private(self, client_ip: str) -> bool:
+        """A local proxy fetches from this network for clients on it; a public one never."""
+        return not getattr(self.server_ctx, "public", False) and is_private_host(client_ip or "")
 
     def _dispatch_proxy_url(self, path_with_query: str, client_ip: str = "") -> Tuple[int, str, bytes]:
         if not client_ip:
@@ -213,11 +212,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(path_with_query)
         path = parsed.path
         if path.startswith("/market/"):
-            rel = path[len("/market/"):].lstrip("/")
+            rel = urllib.parse.unquote(path[len("/market/"):])
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             for cand_dir in (os.path.join(base_dir, "apps"), os.path.join(base_dir, "dist")):
-                cand = os.path.join(cand_dir, rel)
-                if os.path.isfile(cand):
+                cand = safe_join(cand_dir, rel)
+                if cand and os.path.isfile(cand):
                     ctype = "application/json" if rel.endswith(".json") else "application/octet-stream"
                     with open(cand, "rb") as f:
                         return 200, ctype, f.read()
@@ -232,17 +231,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 sub_url = p_target.path + ("?" + p_target.query if p_target.query else "")
                 return handle_app_query(sub_url, client_ip=client_ip)
             try:
-                import urllib.request as _ureq
-                hdrs = {"User-Agent": "MiniScheme-Proxy/1.0"}
-                if client_ip:
-                    hdrs["X-Forwarded-For"] = client_ip
-                req = _ureq.Request(target_url, headers=hdrs)
-                with _ureq.urlopen(req, timeout=5) as resp:
-                    body = resp.read(512 * 1024)
-                    ctype = resp.headers.get("Content-Type", "application/json")
-                    return 200, ctype, body
+                ctype, body = guarded_fetch(target_url, allow_private=self._allow_private(client_ip))
+                return 200, ctype, body
+            except FetchRefused as e:
+                return 403, "text/plain", f"fetch refused: {e}".encode("utf-8")
             except Exception as e:
-                return 502, "text/plain", f"fetch error: {e}".encode("utf-8")
+                return 502, "text/plain", f"fetch error: {type(e).__name__}".encode("utf-8")
         return handle_app_query(path_with_query, client_ip=client_ip)
 
     def do_POST(self):
@@ -267,15 +261,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send_json({"success": False, "error": f"invalid payload: {e}"}, 400)
 
-            # Derive master_key_2
-            m2 = derive_master_key_2(self.server_ctx.master_key_1, hw_hash_key, mac)
-            client_ip = self.client_address[0]
-            self.server_ctx.db.register_device(mac, hw_hash_key, m2, client_ip)
-            self.server_ctx.db.log_access(mac, client_ip, "POST", "/channel/register", 200, len(raw_body))
-
+            # A new device is registered; a registered one gets its own key
+            # back only with the same hash key (its keys are never replaced)
+            client_ip = self._get_client_ip()
+            got = register_device(self.server_ctx.db, self.server_ctx.master_key_1, mac, hw_hash_key, client_ip)
+            self.server_ctx.db.log_access(mac, client_ip, "POST", "/channel/register", 200 if got else 403, len(raw_body))
+            if not got:
+                return self._send_json({"success": False, "error": "verification failed"}, 403)
             return self._send_json({
                 "success": True,
-                "master_key_2": m2.hex(),
+                "status": got[0],
+                "master_key_2": got[1].hex(),
                 "time": int(time.time())
             })
 
@@ -382,7 +378,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     # Brand new device: derive master_key_2 and register (Step 2 - 1 RTT)
                     m2 = derive_master_key_2(self.server_ctx.master_key_1, hw_hash_key, mac)
                     client_ip = self._get_client_ip()
-                    self.server_ctx.db.register_device(mac, hw_hash_key, m2, client_ip)
+                    if not self.server_ctx.db.register_device(mac, hw_hash_key, m2, client_ip):
+                        return self._send_json({"success": False, "error": "verification failed"}, 403)
                     self.server_ctx.db.log_access(mac, client_ip, "POST", "/channel/auth", 200, len(raw_body))
                     return self._send_json({
                         "success": True,
@@ -456,7 +453,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 payload = {}
             mac = payload.get("mac") or qs.get("mac", [""])[0]
-            token = payload.get("token") or qs.get("token", [""])[0]
+            token = self._session_token(qs, payload)
             app_id = payload.get("app_id") or qs.get("app_id", [""])[0]
             if not check_user_session(token, mac):
                 return self._send_json({"success": False, "error": "unauthorized"}, 401)
@@ -473,7 +470,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 payload = {}
             mac = payload.get("mac") or qs.get("mac", [""])[0]
-            token = payload.get("token") or qs.get("token", [""])[0]
+            token = self._session_token(qs, payload)
             if not check_user_session(token, mac):
                 return self._send_json({"success": False, "error": "unauthorized"}, 401)
             self.server_ctx.db.delete_device_account(mac)
@@ -483,7 +480,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/user/logout":
             try:
                 payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
-                remove_user_session(payload.get("token", ""))
+                remove_user_session(self._session_token(None, payload))
             except Exception:
                 pass
             return self._send_json({"success": True})
@@ -499,7 +496,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 return self._send_json({"success": False, "error": "bad request"}, 400)
 
-            if pwd == self.server_ctx.admin_password:
+            if self.server_ctx.admin_password and secrets.compare_digest(str(pwd), self.server_ctx.admin_password):
                 token = create_admin_session()
                 return self._send_json({"success": True, "token": token})
             return self._send_json({"success": False, "error": "password incorrect"}, 403)
@@ -507,7 +504,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/admin/logout":
             try:
                 payload = json.loads(raw_body.decode("utf-8")) if raw_body else {}
-                remove_admin_session(payload.get("token", ""))
+                remove_admin_session(self._session_token(None, payload))
             except Exception:
                 pass
             return self._send_json({"success": True})
@@ -516,7 +513,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/admin/preset":
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
-                token = payload.get("token", "")
+                token = self._session_token(None, payload)
                 if not verify_admin_session(token):
                     return self._send_json({"success": False, "error": "unauthorized"}, 401)
                 mac = payload["mac"]
@@ -531,7 +528,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/admin/device/clear":
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
-                token = payload.get("token", "")
+                token = self._session_token(None, payload)
                 if not verify_admin_session(token):
                     return self._send_json({"success": False, "error": "unauthorized"}, 401)
                 mac = payload["mac"]
@@ -543,7 +540,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/admin/device/delete":
             try:
                 payload = json.loads(raw_body.decode("utf-8"))
-                token = payload.get("token", "")
+                token = self._session_token(None, payload)
                 if not verify_admin_session(token):
                     return self._send_json({"success": False, "error": "unauthorized"}, 401)
                 mac = payload["mac"]
@@ -555,54 +552,23 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self._send_json({"error": "not found"}, 404)
 
     def _handle_encrypted_channel(self, raw: bytes):
-        if len(raw) < 5 + 16 + 4 + 16 or raw[:4] != b"MSC1":
-            return self._send_json({"error": "malformed channel frame"}, 400)
+        """MSC1 (channel.py): each request once, the proxy's own paths answered
+        here, any other URL fetched from the internet (or this network, locally)."""
+        def master_key_2_of(device):
+            dev = self.server_ctx.db.get_device(device)
+            return bytes(dev["master_key_2"]) if dev and dev.get("master_key_2") else None
 
-        id_len = raw[4]
-        dev_id_bytes = raw[5:5 + id_len]
-        mac = dev_id_bytes.decode("utf-8", "replace").upper().replace(":", "").replace("-", "")
-        nonce = raw[5 + id_len:5 + id_len + 16]
-        sz_bytes = raw[5 + id_len + 16:5 + id_len + 20]
-        size = struct.unpack(">I", sz_bytes)[0]
-        ciphertext_and_tag = raw[5 + id_len + 20:5 + id_len + 20 + size + 16]
-
-        dev = self.server_ctx.db.get_device(mac)
-        if not dev:
-            return self._send_json({"error": "unknown device"}, 403)
-
-        m2 = dev["master_key_2"]
-        k_req, k_resp = derive_request_keys(m2, nonce)
-
-        # Decrypt
-        aad = raw[:5 + id_len + 20]
         try:
-            plaintext = aes_gcm_decrypt(k_req, bytes(12), ciphertext_and_tag, aad)
-        except Exception:
-            try:
-                plaintext = aes_gcm_decrypt(k_req, nonce, ciphertext_and_tag, aad)
-            except Exception:
-                return self._send_json({"error": "authentication tag failed"}, 403)
-
-        # Plaintext format: u32 timestamp | u8 method_len | method | u16 url_len | url | body
-        ts = struct.unpack(">I", plaintext[:4])[0]
-        now = int(time.time())
-        if ts != 0 and abs(now - ts) > CHANNEL_SKEW_SECONDS:
-            return self._send_json({"error": f"timestamp skewed by {ts - now}s"}, 403)
-
-        m_len = plaintext[4]
-        method = plaintext[5:5 + m_len].decode("ascii", "replace")
-        u_len = struct.unpack(">H", plaintext[5 + m_len:7 + m_len])[0]
-        url = plaintext[7 + m_len:7 + m_len + u_len].decode("utf-8", "replace")
-        body = plaintext[7 + m_len + u_len:]
-
-        # Step 5: Route request to unified app & market dispatcher
-        resp_status, _, resp_body = self._dispatch_proxy_url(url)
-
-        # Encrypt response using MSC1 chunked records
-        out = pack_channel_response(k_resp, resp_status, resp_body)
+            device, k_resp, method, url, body, clock = open_request(raw, master_key_2_of)
+        except ChannelError as e:
+            return self._send_json({"error": e.message}, e.status)
         client_ip = self._get_client_ip()
-        self.server_ctx.db.update_device_seen(mac, client_ip)
-        self.server_ctx.db.log_access(mac, client_ip, method, url, resp_status, len(raw))
+        resp_status, resp_body = answer(method, url, body,
+                                        lambda p: self._dispatch_proxy_url(p, client_ip=client_ip),
+                                        allow_private=self._allow_private(client_ip))
+        out = seal(k_resp, resp_status, resp_body)
+        self.server_ctx.db.update_device_seen(device, client_ip)
+        self.server_ctx.db.log_access(device, client_ip, method, url, resp_status, len(raw))
 
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
@@ -612,8 +578,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 class ProxyServer(http.server.ThreadingHTTPServer):
-    def __init__(self, server_address, master_key_1: bytes, admin_password: str, db_path: str = "minischeme_proxy.db", protocol_mode: str = "both", admin_login_delay: int = 0):
+    def __init__(self, server_address, master_key_1: bytes, admin_password: str, db_path: str = "minischeme_proxy.db", protocol_mode: str = "both", admin_login_delay: int = 0, public: bool = False):
         super().__init__(server_address, ProxyHandler)
+        self.public = public   # on the internet: never fetches from private networks
         self.master_key_1 = master_key_1
         self.admin_password = admin_password
         self.db = Database(db_path)

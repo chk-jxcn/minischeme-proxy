@@ -147,10 +147,18 @@ async function doAdminLogin() {
   }
 }
 
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function authHeaders(extra) {
+  return Object.assign({'X-Session-Token': adminToken}, extra || {});
+}
+
 async function loadDevices() {
   if (!adminToken) return false;
   try {
-    const r = await fetch('/api/admin/devices?token=' + adminToken);
+    const r = await fetch('/api/admin/devices', { headers: authHeaders() });
     if (!r.ok) return false;
     const d = await r.json();
     if (!d.success) return false;
@@ -161,19 +169,23 @@ async function loadDevices() {
         const isSim = dev.status === 'simulator' || (dev.mac && dev.mac.startsWith('SIM-'));
         const badge = isSim
           ? '<span class="badge" style="background:#f3e8ff;color:#7e22ce;">🎮 WASM 模拟器</span>'
-          : `<span class="badge">${dev.status}</span>`;
+          : `<span class="badge">${esc(dev.status)}</span>`;
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td><b>${dev.mac}</b></td>` +
+        tr.innerHTML = `<td><b>${esc(dev.mac)}</b></td>` +
           `<td>${new Date(dev.created_at*1000).toLocaleString()}</td>` +
           `<td>${new Date(dev.last_seen_at*1000).toLocaleString()}</td>` +
-          `<td>${dev.last_ip || '-'}</td>` +
+          `<td>${esc(dev.last_ip || '-')}</td>` +
           `<td>${badge}</td>` +
-          `<td>${dev.data_bytes} B</td>` +
+          `<td>${Number(dev.data_bytes) || 0} B</td>` +
           `<td>` +
-          `<button style="padding:4px 8px;font-size:12px;margin-right:4px;" onclick="viewDetail('${dev.mac}')">明文审阅</button>` +
-          `<button style="padding:4px 8px;font-size:12px;margin-right:4px;background:#f59e0b;" onclick="clearDeviceData('${dev.mac}')">清空数据</button>` +
-          `<button style="padding:4px 8px;font-size:12px;background:#ef4444;" onclick="deleteDevice('${dev.mac}')">注销</button>` +
+          `<button data-act="view" style="padding:4px 8px;font-size:12px;margin-right:4px;">明文审阅</button>` +
+          `<button data-act="clear" style="padding:4px 8px;font-size:12px;margin-right:4px;background:#f59e0b;">清空数据</button>` +
+          `<button data-act="delete" style="padding:4px 8px;font-size:12px;background:#ef4444;">注销</button>` +
           `</td>`;
+        const actions = { view: viewDetail, clear: clearDeviceData, delete: deleteDevice };
+        tr.querySelectorAll('button[data-act]').forEach(b => {
+          b.addEventListener('click', () => actions[b.dataset.act](dev.mac));
+        });
         tbody.appendChild(tr);
       });
     } else {
@@ -186,7 +198,7 @@ async function loadDevices() {
 }
 
 async function viewDetail(mac) {
-  const r = await fetch(`/api/admin/device/data?mac=${mac}&token=${adminToken}`);
+  const r = await fetch(`/api/admin/device/data?mac=${encodeURIComponent(mac)}`, { headers: authHeaders() });
   const d = await r.json();
   document.getElementById('detail-mac').innerText = mac;
   const tbody = document.querySelector('#detail-table tbody');
@@ -194,7 +206,7 @@ async function viewDetail(mac) {
   if (d.items && d.items.length) {
     d.items.forEach(it => {
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td><b>${it.app_id}</b></td><td>${it.key}</td><td><code>${it.value}</code></td><td>${new Date(it.updated_at*1000).toLocaleString()}</td>`;
+      tr.innerHTML = `<td><b>${esc(it.app_id)}</b></td><td>${esc(it.key)}</td><td><code>${esc(it.value)}</code></td><td>${new Date(it.updated_at*1000).toLocaleString()}</td>`;
       tbody.appendChild(tr);
     });
   } else {

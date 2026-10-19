@@ -19,7 +19,6 @@ import json
 import os
 import secrets
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -27,6 +26,17 @@ import time
 import urllib.parse
 import urllib.request
 import webbrowser
+
+from proxy.security import (
+    FetchRefused,
+    client_ip as _trusted_client_ip,
+    cors_origin,
+    guarded_fetch,
+    is_private_host,
+    redact_url,
+    safe_join,
+    static_path_blocked,
+)
 
 DEFAULT_PORT = int(os.environ.get("WEBREPL_PORT", "8087"))
 
@@ -252,6 +262,18 @@ class ServerConfig:
         except Exception:
             self.admin_login_delay = 0
 
+        # The server's own QWeather credentials, for devices without a token
+        try:
+            from proxy.endpoints import set_qweather_default
+            set_qweather_default(cfg.get("qweather", "key", fallback=""), cfg.get("qweather", "host", fallback=""))
+        except Exception:
+            pass
+
+    def is_public(self):
+        """A server on the internet (encrypted protocol, or the proxy-only
+        deployment): it never fetches from private networks for anyone."""
+        return self.protocol_mode != "unencrypted" or "webrepl" not in self.components
+
     def set_components_from_str(self, comp_str):
         if not comp_str or comp_str.lower().strip() in ("all", "*"):
             self.components = set(ALL_COMPONENTS)
@@ -267,7 +289,7 @@ class IntegratedProxyContext:
     def __init__(self):
         self.db = None
         self.master_key_1 = None
-        self.admin_password = "admin"
+        self.admin_password = ""   # none set: the admin portal is open to this machine only
         self.admin_login_delay = 0
         self.recovery_challenges = {}
         self._lock = threading.Lock()
@@ -295,7 +317,7 @@ class IntegratedProxyContext:
                 self.admin_password = (
                     os.getenv("MINISCHEME_ADMIN_PASSWORD")
                     or cfg.get("security", "admin_password", fallback="")
-                    or "admin"
+                    or ""
                 )
                 self.admin_login_delay = server_config.admin_login_delay
                 db_path = os.path.join(DATA_DIR, "minischeme_proxy.db")
@@ -394,14 +416,22 @@ def fetch_latest_release_asset(repo, asset_name):
     return 404, "application/json", b'{"error":"release asset not found"}'
 
 
+def fetch_allows_private(client_ip):
+    """Whether /fetch may reach this network for a client: only on a local
+    server (the PC's WebREPL), for a client on this network."""
+    return not server_config.is_public() and is_private_host(client_ip or "")
+
+
 def handle_proxy_endpoint(path_with_query, client_ip=""):
     """Dispatch /app/*, /health, and /market/* requests in-process."""
     parsed = urllib.parse.urlparse(path_with_query)
     path = parsed.path
 
     if path.startswith("/market/"):
-        rel = path[len("/market/"):].lstrip("/")
-        local_candidate = os.path.join(BASE_DIR, "apps", rel)
+        rel = urllib.parse.unquote(path[len("/market/"):])
+        local_candidate = safe_join(os.path.join(BASE_DIR, "apps"), rel)
+        if local_candidate is None:
+            return 404, "application/json", b'{"error":"market file not found"}'
         if os.path.isfile(local_candidate):
             ctype = "application/json" if rel.endswith(".json") else "application/octet-stream"
             with open(local_candidate, "rb") as f:
@@ -423,13 +453,12 @@ def handle_proxy_endpoint(path_with_query, client_ip=""):
             from proxy.endpoints import handle_app_query
             return handle_app_query(sub_url, client_ip=client_ip)
         try:
-            req = urllib.request.Request(target_url, headers={"User-Agent": "MiniScheme-Proxy/1.0"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                body = resp.read(512 * 1024)
-                ctype = resp.headers.get("Content-Type", "application/json")
-                return 200, ctype, body
+            ctype, body = guarded_fetch(target_url, allow_private=fetch_allows_private(client_ip))
+            return 200, ctype, body
+        except FetchRefused as e:
+            return 403, "text/plain", f"fetch refused: {e}".encode("utf-8")
         except Exception as e:
-            return 502, "text/plain", f"fetch error: {e}".encode("utf-8")
+            return 502, "text/plain", f"fetch error: {type(e).__name__}".encode("utf-8")
 
     from proxy.endpoints import handle_app_query
     return handle_app_query(path_with_query, client_ip=client_ip)
@@ -466,16 +495,26 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
         return clean_path
 
     def log_message(self, format, *args):
-        # Avoid crashing when running without a console window (--noconsole)
+        # Avoid crashing when running without a console window (--noconsole);
+        # tokens and keys in query strings stay out of the log
         if sys.stderr is not None:
             try:
+                args = tuple(redact_url(a) if isinstance(a, str) and "?" in a else a for a in args)
                 super().log_message(format, *args)
             except Exception:
                 pass
 
     def send_header(self, keyword, value):
-        # Prevent duplicate CORS headers that violate browser CORS policies (e.g. multiple "*, *")
+        # CORS goes only to allowed origins (cors_origin): the value a handler
+        # asks for is replaced by the request's own origin, or dropped
         k_lower = keyword.lower()
+        if k_lower in ("access-control-allow-origin", "access-control-allow-private-network"):
+            allowed = cors_origin(self.headers.get("Origin", ""), self.headers.get("Host", ""),
+                                  urllib.parse.urlparse(self.path).path)
+            if allowed is None:
+                return
+            if k_lower == "access-control-allow-origin":
+                value = allowed
         if k_lower in ("access-control-allow-origin", "access-control-allow-private-network"):
             prefix = f"{k_lower}:".encode("latin-1")
             if hasattr(self, "_headers_buffer") and any(
@@ -485,23 +524,18 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
         super().send_header(keyword, value)
 
     def _get_client_ip(self) -> str:
-        xff = self.headers.get("X-Forwarded-For")
-        if xff:
-            ip = xff.split(",")[0].strip()
-            if ":" in ip and not ip.startswith("[") and ip.count(":") == 1:
-                ip = ip.split(":")[0].strip()
-            if ip:
-                return ip
-        x_real = self.headers.get("X-Real-IP")
-        if x_real:
-            ip = x_real.strip()
-            if ":" in ip and not ip.startswith("[") and ip.count(":") == 1:
-                ip = ip.split(":")[0].strip()
-            if ip:
-                return ip
-        if hasattr(self, "client_address") and self.client_address:
-            return str(self.client_address[0]).strip()
-        return ""
+        peer = str(self.client_address[0]) if getattr(self, "client_address", None) else ""
+        return _trusted_client_ip(peer, self.headers)
+
+    def _session_token(self, qs=None, payload=None) -> str:
+        """The portal session token: X-Session-Token header (or the older
+        token= query / JSON field)."""
+        tok = self.headers.get("X-Session-Token", "")
+        if not tok and payload:
+            tok = payload.get("token", "") or ""
+        if not tok and qs:
+            tok = (qs.get("token") or [""])[0]
+        return tok
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -662,12 +696,13 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "url must be http(s)://<host>/<path>.json, an app image or an app proxy URL (/app/...)")
                 return
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": "MiniScheme-WebREPL/1.0"})
-                with urllib.request.urlopen(req, timeout=4) as resp:
-                    body = resp.read(512 * 1024)
+                _, body = guarded_fetch(url, allow_private=fetch_allows_private(self._get_client_ip()), timeout=4)
                 status = 200
+            except FetchRefused as e:
+                body = f"fetch refused: {e}".encode("utf-8")
+                status = 403
             except Exception as e:
-                body = f"{url} unreachable: {e}".encode("utf-8")
+                body = f"{redact_url(url)} unreachable: {type(e).__name__}".encode("utf-8")
                 status = 502
             self.send_response(status)
             self.send_header(
@@ -720,32 +755,37 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 return self._json_reply({"success": True, "nonce": generate_user_nonce(mac)})
             if req_path == "/api/user/data":
                 mac = qs.get("mac", [""])[0]
-                token = qs.get("token", [""])[0]
+                token = self._session_token(qs)
                 if not check_user_session(token, mac):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 return self._json_reply({"success": True, "items": proxy_ctx.db.get_app_data(mac, masked=True)})
             if req_path == "/api/admin/status":
                 mode = server_config.protocol_mode
-                pwd = proxy_ctx.admin_password
-                auth_req = (mode == "encrypted" or pwd != "admin")
+                # without a configured password only this machine's own
+                # browser gets in (the tray menu), never a page of another origin
+                from proxy.security import is_loopback_host
+                origin = self.headers.get("Origin", "")
+                own_page = not origin or is_loopback_host(urllib.parse.urlparse(origin).hostname or "")
+                auth_req = bool(proxy_ctx.admin_password) or server_config.is_public() or not (
+                    is_loopback_host(self._get_client_ip()) and own_page)
                 resp = {"success": True, "auth_required": auth_req, "protocol_mode": mode}
                 if not auth_req:
                     resp["token"] = create_admin_session()
                 return self._json_reply(resp)
             if req_path == "/api/admin/devices":
-                token = qs.get("token", [""])[0]
+                token = self._session_token(qs)
                 if not verify_admin_session(token):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 return self._json_reply({"success": True, "devices": proxy_ctx.db.admin_list_devices()})
             if req_path == "/api/admin/device/data":
-                token = qs.get("token", [""])[0]
+                token = self._session_token(qs)
                 mac = qs.get("mac", [""])[0]
                 if not verify_admin_session(token):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 return self._json_reply({"success": True, "items": proxy_ctx.db.get_app_data(mac, masked=False)})
             if req_path == "/api/user/logs":
                 mac = qs.get("mac", [""])[0]
-                token = qs.get("token", [""])[0]
+                token = self._session_token(qs)
                 if not check_user_session(token, mac):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 return self._json_reply({"success": True, "items": proxy_ctx.db.get_device_logs(mac)})
@@ -768,7 +808,16 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if static_path_blocked(req_path):
+            self.send_error(404, "File not found")
+            return
         super().do_GET()
+
+    def do_HEAD(self):
+        if static_path_blocked(urllib.parse.urlparse(self.path).path):
+            self.send_error(404, "File not found")
+            return
+        super().do_HEAD()
 
     def _font_call(self, fn, *args):
         try:
@@ -849,18 +898,18 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 if server_config.admin_login_delay > 0:
                     time.sleep(server_config.admin_login_delay)
                 pwd = payload.get("password", "")
-                if pwd == proxy_ctx.admin_password:
+                if proxy_ctx.admin_password and secrets.compare_digest(str(pwd), proxy_ctx.admin_password):
                     token = create_admin_session()
                     return self._json_reply({"success": True, "token": token})
                 return self._json_reply({"success": False, "error": "password incorrect"}, 403)
 
             if req_path == "/api/admin/logout":
-                token = payload.get("token", "")
+                token = self._session_token(None, payload)
                 remove_admin_session(token)
                 return self._json_reply({"success": True})
 
             if req_path == "/api/admin/device/clear":
-                token = payload.get("token", "")
+                token = self._session_token(None, payload)
                 if not verify_admin_session(token):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 mac = payload.get("mac", "")
@@ -868,7 +917,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 return self._json_reply({"success": True})
 
             if req_path == "/api/admin/device/delete":
-                token = payload.get("token", "")
+                token = self._session_token(None, payload)
                 if not verify_admin_session(token):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 mac = payload.get("mac", "")
@@ -876,7 +925,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 return self._json_reply({"success": True})
 
             if req_path == "/api/admin/preset":
-                token = payload.get("token", "")
+                token = self._session_token(None, payload)
                 if not verify_admin_session(token):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 mac = payload.get("mac", "")
@@ -916,7 +965,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             if req_path == "/api/user/data/clear":
                 qs = urllib.parse.parse_qs(parsed_self.query)
                 mac = payload.get("mac") or qs.get("mac", [""])[0]
-                token = payload.get("token") or qs.get("token", [""])[0]
+                token = self._session_token(qs, payload)
                 app_id = payload.get("app_id") or qs.get("app_id", [""])[0]
                 if not check_user_session(token, mac):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
@@ -929,7 +978,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             if req_path == "/api/user/account/delete":
                 qs = urllib.parse.parse_qs(parsed_self.query)
                 mac = payload.get("mac") or qs.get("mac", [""])[0]
-                token = payload.get("token") or qs.get("token", [""])[0]
+                token = self._session_token(qs, payload)
                 if not check_user_session(token, mac):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 proxy_ctx.db.delete_device_account(mac)
@@ -937,7 +986,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 return self._json_reply({"success": True})
 
             if req_path == "/api/user/logout":
-                token = payload.get("token", "")
+                token = self._session_token(None, payload)
                 remove_user_session(token)
                 return self._json_reply({"success": True})
 
@@ -954,11 +1003,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             from proxy.crypto import (
                 derive_hardware_hash_key,
                 derive_master_key_2,
-                derive_request_keys,
                 verify_challenge_response,
-                aes_gcm_encrypt,
-                aes_gcm_decrypt,
-                pack_channel_response,
             )
             content_length = int(self.headers.get("Content-Length", 0))
             raw_body = self.rfile.read(content_length) if content_length > 0 else b""
@@ -971,12 +1016,15 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     return self._json_reply({"success": False, "error": f"invalid payload: {e}"}, 400)
 
                 if "hardware_password" in payload:
-                    hw_pass = payload["hardware_password"]
-                    hw_hash_key = derive_hardware_hash_key(hw_pass, mac)
-                    m2 = derive_master_key_2(proxy_ctx.master_key_1, hw_hash_key, mac)
-                    client_ip = self._get_client_ip()
-                    proxy_ctx.db.register_device(mac, hw_hash_key, m2, client_ip)
-                    return self._json_reply({"success": True, "status": "registered", "master_key_2": m2.hex(), "time": int(time.time())})
+                    # First registration sends the password in the clear (by
+                    # design); a registered device only gets its own key back
+                    # with the same password, its keys are never replaced
+                    from proxy.channel import register_device
+                    hw_hash_key = derive_hardware_hash_key(str(payload["hardware_password"]), mac)
+                    got = register_device(proxy_ctx.db, proxy_ctx.master_key_1, mac, hw_hash_key, self._get_client_ip())
+                    if not got:
+                        return self._json_reply({"success": False, "error": "verification failed"}, 403)
+                    return self._json_reply({"success": True, "status": got[0], "master_key_2": got[1].hex(), "time": int(time.time())})
 
                 if "response" in payload:
                     response = bytes.fromhex(payload["response"])
@@ -997,51 +1045,30 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                         return self._json_reply({"success": True, "status": "challenge_required", "challenge": ch_nonce.hex(), "time": int(time.time())})
                     m2 = derive_master_key_2(proxy_ctx.master_key_1, hw_hash_key, mac)
                     client_ip = self._get_client_ip()
-                    proxy_ctx.db.register_device(mac, hw_hash_key, m2, client_ip)
+                    if not proxy_ctx.db.register_device(mac, hw_hash_key, m2, client_ip):
+                        return self._json_reply({"success": False, "error": "verification failed"}, 403)
                     return self._json_reply({"success": True, "status": "registered", "master_key_2": m2.hex(), "time": int(time.time())})
 
             if req_path == "/channel":
-                if len(raw_body) < 5 + 16 + 4 + 16 or raw_body[:4] != b"MSC1":
-                    return self._json_reply({"error": "malformed channel frame"}, 400)
-                id_len = raw_body[4]
-                mac = raw_body[5:5 + id_len].decode("utf-8", "replace").upper().replace(":", "").replace("-", "")
-                nonce = raw_body[5 + id_len:5 + id_len + 16]
-                size = struct.unpack(">I", raw_body[5 + id_len + 16:5 + id_len + 20])[0]
-                ct_tag = raw_body[5 + id_len + 20:5 + id_len + 20 + size + 16]
+                # MSC1 (proxy/channel.py): each request once, the proxy's own
+                # paths answered here, any other URL fetched from the internet
+                from proxy.channel import ChannelError, answer, open_request, seal
 
-                dev = proxy_ctx.db.get_device(mac)
-                if not dev:
-                    return self._json_reply({"error": "unknown device"}, 403)
+                def master_key_2_of(device):
+                    dev = proxy_ctx.db.get_device(device)
+                    return bytes(dev["master_key_2"]) if dev and dev.get("master_key_2") else None
 
-                m2 = dev["master_key_2"]
-                k_req, k_resp = derive_request_keys(m2, nonce)
-
-                aad = raw_body[:5 + id_len + 20]
                 try:
-                    pt = aes_gcm_decrypt(k_req, bytes(12), ct_tag, aad)
-                except Exception:
-                    try:
-                        pt = aes_gcm_decrypt(k_req, nonce, ct_tag, aad)
-                    except Exception:
-                        return self._json_reply({"error": "authentication tag failed"}, 403)
-
-                ts = struct.unpack(">I", pt[:4])[0]
-                now = int(time.time())
-                # Relaxed timestamp validation (allow clock drift up to 7 days)
-                if ts != 0 and abs(now - ts) > 604800:
-                    return self._json_reply({"error": f"timestamp skewed by {ts - now}s"}, 403)
-
-                m_len = pt[4]
-                method = pt[5:5 + m_len].decode("ascii", "replace")
-                u_len = struct.unpack(">H", pt[5 + m_len:7 + m_len])[0]
-                url = pt[7 + m_len:7 + m_len + u_len].decode("utf-8", "replace")
-                body = pt[7 + m_len + u_len:]
-
+                    device, k_resp, method, url, body, clock = open_request(raw_body, master_key_2_of)
+                except ChannelError as e:
+                    return self._json_reply({"error": e.message}, e.status)
                 client_ip = self._get_client_ip()
-                status, _, resp_body = handle_proxy_endpoint(url, client_ip=client_ip)
-                out = pack_channel_response(k_resp, status, resp_body)
-                proxy_ctx.db.update_device_seen(mac, client_ip)
-                proxy_ctx.db.log_access(mac, client_ip, method, url, status, len(raw_body))
+                status, resp_body = answer(method, url, body,
+                                           lambda p: handle_proxy_endpoint(p, client_ip=client_ip),
+                                           allow_private=fetch_allows_private(client_ip))
+                out = seal(k_resp, status, resp_body)
+                proxy_ctx.db.update_device_seen(device, client_ip)
+                proxy_ctx.db.log_access(device, client_ip, method, url, status, len(raw_body))
 
                 self.send_response(200)
                 self.send_header("Content-Type", "application/octet-stream")

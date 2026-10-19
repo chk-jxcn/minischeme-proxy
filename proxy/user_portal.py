@@ -134,11 +134,11 @@ async function doHwLogin() {
       return;
     }
 
-    // 2. Hash password with nonce client-side
-    const enc = new TextEncoder();
-    const data = enc.encode(pwd + dNonce.nonce);
-    const hashBuf = await crypto.subtle.digest('SHA-256', data);
-    const hashHex = Array.from(new Uint8Array(hashBuf)).map(b => b.toString(16).padStart(2, '0')).join('');
+    // 2. Prove the password without sending it: SHA-256(hardware hash key || nonce),
+    //    the hash key derived here as the server does (HKDF of the password and MAC);
+    //    plain JS SHA-256, since the public server is http (no crypto.subtle)
+    const hashKey = MiniHash.hwHashKey(pwd, mac);
+    const hashHex = MiniHash.hex(MiniHash.sha256(MiniHash.concat(hashKey, MiniHash.utf8(dNonce.nonce))));
 
     // 3. Authenticate
     const rAuth = await fetch('/api/user/login', {
@@ -212,10 +212,18 @@ function showDashboardView() {
   }
 }
 
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function authHeaders(extra) {
+  return Object.assign({'X-Session-Token': sessionToken}, extra || {});
+}
+
 async function loadDashboard() {
   // Load app data
   try {
-    const rData = await fetch(`/api/user/data?mac=${encodeURIComponent(curMac)}&token=${encodeURIComponent(sessionToken)}`);
+    const rData = await fetch(`/api/user/data?mac=${encodeURIComponent(curMac)}`, { headers: authHeaders() });
     if (!rData.ok) {
       doLogout();
       return;
@@ -230,7 +238,8 @@ async function loadDashboard() {
     if (dData.items && dData.items.length) {
       dData.items.forEach(it => {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td><b>${it.app_id}</b></td><td>${it.key}</td><td><span class="masked">${it.value}</span></td><td>${new Date(it.updated_at*1000).toLocaleString()}</td><td><button style="padding:4px 8px;font-size:12px;background:#ef4444;" onclick="clearApp('${it.app_id}')">清空此应用</button></td>`;
+        tr.innerHTML = `<td><b>${esc(it.app_id)}</b></td><td>${esc(it.key)}</td><td><span class="masked">${esc(it.value)}</span></td><td>${new Date(it.updated_at*1000).toLocaleString()}</td><td><button style="padding:4px 8px;font-size:12px;background:#ef4444;">清空此应用</button></td>`;
+        tr.querySelector('button').addEventListener('click', () => clearApp(it.app_id));
         tbody.appendChild(tr);
       });
     } else {
@@ -238,14 +247,14 @@ async function loadDashboard() {
     }
 
     // Load logs
-    const rLogs = await fetch(`/api/user/logs?mac=${encodeURIComponent(curMac)}&token=${encodeURIComponent(sessionToken)}`);
+    const rLogs = await fetch(`/api/user/logs?mac=${encodeURIComponent(curMac)}`, { headers: authHeaders() });
     const dLogs = await rLogs.json();
     const logTbody = document.querySelector('#log-table tbody');
     logTbody.innerHTML = '';
     if (dLogs.items && dLogs.items.length) {
       dLogs.items.forEach(l => {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${new Date(l.timestamp*1000).toLocaleString()}</td><td>${l.ip}</td><td>${l.method}</td><td>${l.endpoint}</td><td>${l.status_code}</td><td>${l.bytes_transferred} B</td>`;
+        tr.innerHTML = `<td>${new Date(l.timestamp*1000).toLocaleString()}</td><td>${esc(l.ip)}</td><td>${esc(l.method)}</td><td>${esc(l.endpoint)}</td><td>${Number(l.status_code) || 0}</td><td>${Number(l.bytes_transferred) || 0} B</td>`;
         logTbody.appendChild(tr);
       });
     } else {
@@ -258,19 +267,19 @@ async function loadDashboard() {
 
 async function clearApp(appId) {
   if (!confirm(`确认清空应用 ${appId} 的所有数据？`)) return;
-  await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=${encodeURIComponent(appId)}&token=${encodeURIComponent(sessionToken)}`, { method: 'POST' });
+  await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=${encodeURIComponent(appId)}`, { method: 'POST', headers: authHeaders() });
   loadDashboard();
 }
 
 async function clearAllData() {
   if (!confirm(`确认一键清空该设备 (${curMac}) 的所有应用配置数据？`)) return;
-  await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=all&token=${encodeURIComponent(sessionToken)}`, { method: 'POST' });
+  await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=all`, { method: 'POST', headers: authHeaders() });
   loadDashboard();
 }
 
 async function doDeleteAccount() {
   if (!confirm('警告：此操作将永久注销设备账户并清空所有记录，确认继续？')) return;
-  await fetch(`/api/user/account/delete?mac=${encodeURIComponent(curMac)}&token=${encodeURIComponent(sessionToken)}`, { method: 'POST' });
+  await fetch(`/api/user/account/delete?mac=${encodeURIComponent(curMac)}`, { method: 'POST', headers: authHeaders() });
   alert('账户已注销');
   doLogout();
 }
@@ -324,6 +333,10 @@ window.addEventListener('DOMContentLoaded', () => {
 """
 
 from .database import normalize_device_id
+from .hwkey_js import HWKEY_JS
+
+# The page's own SHA-256 / HKDF (hwkey_js.py) goes in before its script
+USER_HTML = USER_HTML.replace("<script>", "<script>\n" + HWKEY_JS + "\n", 1)
 
 _active_nonces: Dict[str, Tuple[str, float]] = {}
 _user_sessions: Dict[str, Tuple[str, float]] = {}

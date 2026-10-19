@@ -51,7 +51,7 @@ def test_device_key_lifecycle():
 @pytest.mark.skipif(not HAS_CRYPTOGRAPHY, reason="cryptography library not installed")
 def test_aes_gcm():
     key = b"32_byte_aes_key_for_testing_1234"
-    nonce = b"16_byte_nonce_12"
+    nonce = b"12_byte_iv!!"
     plaintext = b"Hello, MiniScheme Encrypted Channel!"
     aad = b"associated_authenticated_data"
 

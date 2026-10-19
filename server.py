@@ -514,16 +514,39 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
         # 1. Server Discovery & Status API (/api/server_info)
         if req_path == "/api/server_info":
             ips = get_local_ips()
-            primary_ip = ips[0]
+            primary_ip = ips[0] if ips else "127.0.0.1"
+
+            # Check if accessed via public IP or hostname in Host header
+            raw_host = (self.headers.get("Host") or "").split(":")[0].strip()
+            from proxy.endpoints import is_private_ip
+            is_public_host = False
+            effective_ip = primary_ip
+
+            if raw_host and raw_host not in ("localhost", "0.0.0.0", "127.0.0.1"):
+                if not is_private_ip(raw_host):
+                    effective_ip = raw_host
+                    is_public_host = True
+                    # Put public host at top and suppress internal cloud VPC IPs (e.g. 10.0.0.4)
+                    filtered_ips = [raw_host] + [ip for ip in ips if not ip.startswith("10.")]
+                    ips = filtered_ips
+                elif is_private_ip(primary_ip) and primary_ip.startswith("10.") and not raw_host.startswith("10."):
+                    effective_ip = raw_host
+
+            if is_public_host or not is_private_ip(effective_ip):
+                lan_target = f"http://{effective_ip}:{ACTIVE_PORT}"
+            else:
+                lan_target = f"http://{primary_ip}:{ACTIVE_PORT}"
+
             self._json_reply({
                 "success": True,
-                "ip": primary_ip,
+                "ip": effective_ip,
                 "ips": ips,
                 "port": ACTIVE_PORT,
+                "is_public": is_public_host,
                 "local_url": f"http://127.0.0.1:{ACTIVE_PORT}",
-                "lan_url": f"http://{primary_ip}:{ACTIVE_PORT}",
-                "proxy_url": f"http://{primary_ip}:{ACTIVE_PORT}",
-                "converter_url": f"http://{primary_ip}:{ACTIVE_PORT}",
+                "lan_url": lan_target,
+                "proxy_url": lan_target,
+                "converter_url": lan_target,
                 "protocol_mode": server_config.protocol_mode,
                 "components": sorted(list(server_config.components)),
                 "admin_login_delay": server_config.admin_login_delay,

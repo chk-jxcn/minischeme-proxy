@@ -42,3 +42,14 @@ def test_month_has_real_lunar_days():
     head, days = items[0], kinds(items, "day")
     assert head["c"] == "28" and head["d"] == "0" and len(days) == 28
     assert any(d["b"] == "春节" or d["b"] == "正月" for d in days)   # 2026-02-17 is the lunar new year
+
+
+def test_month_fills_six_weeks_with_adjacent_days():
+    items = cal_month("2026-10", today=dt.date(2026, 10, 20))
+    head, days, other = items[0], kinds(items, "day"), kinds(items, "xday")
+    assert head["b"] == "4" and head["d"] == "20" and len(days) == 31
+    assert [x["a"] for x in other if x["d"] == "p"] == ["27", "28", "29", "30"]
+    assert [x["a"] for x in other if x["d"] == "n"] == [str(d) for d in range(1, 8)]
+    assert len(days) + len(other) == 42
+    feb = cal_month("2026-02", today=dt.date(2026, 10, 20))     # starts on a Sunday: none before
+    assert [x["d"] for x in kinds(feb, "xday")] == ["n"] * 14

@@ -1738,8 +1738,10 @@ def get_usage() -> Dict[str, Any]:
     }
 
 
-def handle_app_query(path_with_query: str, client_ip: str = ""):
-    """Unified dispatcher for /app/* and /fetch requests."""
+def handle_app_query(path_with_query: str, client_ip: str = "", device: str = "", public: bool = False):
+    """Unified dispatcher for /app/* and /fetch requests. device: the device id
+    of an encrypted channel request ("" for plaintext); public: a server on
+    the internet (per-device WxPusher logins and message lists)."""
     import urllib.parse
     import json as _json
     parsed = urllib.parse.urlparse(path_with_query)
@@ -1790,6 +1792,9 @@ def handle_app_query(path_with_query: str, client_ip: str = ""):
             client_ip=effective_ip,
             ym=qs.get("ym", [""])[0]
         )
+    elif path in ("/app/wxpusher", "/app/notifier"):
+        from .wxpusher import app_items
+        data = {"items": app_items(path, {k: v[0] for k, v in qs.items()}, device, public)}
     elif path == "/app/usage":
         data = get_usage()
     elif path == "/app/ping" or path == "/health":

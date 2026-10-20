@@ -275,6 +275,16 @@ class ServerConfig:
         except Exception:
             pass
 
+        # WxPusher: the receivers' logins next to the database; the server's
+        # own app token for /notify wx=1 and /wxpusher/send
+        try:
+            from proxy.wxpusher import set_sender, set_state_dir
+            set_state_dir(os.path.join(DATA_DIR, "wxpusher"))
+            set_sender(cfg.get("wxpusher", "app_token", fallback=""), cfg.get("wxpusher", "uids", fallback=""),
+                       cfg.get("wxpusher", "topic_ids", fallback=""))
+        except Exception:
+            pass
+
     def is_public(self):
         """A server on the internet (encrypted protocol, or the proxy-only
         deployment): it never fetches from private networks for anyone."""
@@ -464,8 +474,9 @@ def fetch_allows_private(client_ip):
     return not server_config.is_public() and is_private_host(client_ip or "")
 
 
-def handle_proxy_endpoint(path_with_query, client_ip=""):
-    """Dispatch /app/*, /health, and /market/* requests in-process."""
+def handle_proxy_endpoint(path_with_query, client_ip="", device=""):
+    """Dispatch /app/*, /health, and /market/* requests in-process (device:
+    the id of an encrypted channel request)."""
     parsed = urllib.parse.urlparse(path_with_query)
     path = parsed.path
 
@@ -493,7 +504,7 @@ def handle_proxy_endpoint(path_with_query, client_ip=""):
         if p_target.path.startswith("/app/") or p_target.path == "/health":
             sub_url = p_target.path + ("?" + p_target.query if p_target.query else "")
             from proxy.endpoints import handle_app_query
-            return handle_app_query(sub_url, client_ip=client_ip)
+            return handle_app_query(sub_url, client_ip=client_ip, device=device, public=server_config.is_public())
         try:
             ctype, body = guarded_fetch(target_url, allow_private=fetch_allows_private(client_ip))
             return 200, ctype, body
@@ -503,7 +514,18 @@ def handle_proxy_endpoint(path_with_query, client_ip=""):
             return 502, "text/plain", f"fetch error: {type(e).__name__}".encode("utf-8")
 
     from proxy.endpoints import handle_app_query
-    return handle_app_query(path_with_query, client_ip=client_ip)
+    return handle_app_query(path_with_query, client_ip=client_ip, device=device, public=server_config.is_public())
+
+
+def handle_wx_request(handler, body=b""):
+    """/notify, /wxpusher/send and /wxpusher/logout (proxy/wxpusher.py): on a
+    public server with the admin's portal session or the device's own."""
+    from proxy.wxpusher import handle_request
+    from proxy.admin_portal import verify_admin_session
+    from proxy.user_portal import check_user_session
+    token = handler._session_token(urllib.parse.parse_qs(urllib.parse.urlparse(handler.path).query))
+    return handle_request(handler.path, body, server_config.is_public(),
+                          lambda mac: verify_admin_session(token) or (bool(mac) and check_user_session(token, mac)))
 
 
 # ---------------------------------------------------------------------------
@@ -676,6 +698,10 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
+        # Notifier: GET /notify works too (phones, curl, a browser)
+        if req_path == "/notify" and "proxy" in server_config.components:
+            return self._wx_reply(handle_wx_request(self))
 
         # 2. Direct App Proxy & Market endpoints (/app/*, /market/*, /fetch)
         if (
@@ -874,9 +900,21 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _wx_reply(self, reply):
+        status, ctype, body = reply
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         parsed_self = urllib.parse.urlparse(self.path)
         req_path = parsed_self.path
+
+        if req_path in ("/notify", "/wxpusher/send", "/wxpusher/logout") and "proxy" in server_config.components:
+            body = self.rfile.read(min(int(self.headers.get("Content-Length", 0) or 0), 65536))
+            return self._wx_reply(handle_wx_request(self, body))
 
         if req_path == "/api/font/make":
             if "font" not in server_config.components:
@@ -1123,7 +1161,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     return self._json_reply({"error": e.message}, e.status)
                 client_ip = self._get_client_ip()
                 status, resp_body = answer(method, url, body,
-                                           lambda p: handle_proxy_endpoint(p, client_ip=client_ip),
+                                           lambda p: handle_proxy_endpoint(p, client_ip=client_ip, device=device),
                                            allow_private=fetch_allows_private(client_ip))
                 out = seal(k_resp, status, resp_body)
                 proxy_ctx.db.update_device_seen(device, client_ip)

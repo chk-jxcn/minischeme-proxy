@@ -230,5 +230,15 @@ def cal_month(ym: str = "", today: Optional[dt.date] = None) -> List[Dict[str, s
         s = Solar.fromYmd(year, month, d)
         label, mark = _day_label(s.getLunar(), s)
         items.append({"t": "day", "a": str(d), "b": label, "c": mark})
+    # the days of the months before and after that fill six weeks, as a
+    # wall calendar shows them ({"t": "xday", d: "p" before, "n" after})
+    lead = (first.weekday() + 1) % 7
+    for k in range(-lead, 6 * 7 - lead):
+        if 0 <= k < days:
+            continue
+        day = first + dt.timedelta(days=k)
+        s = Solar.fromYmd(day.year, day.month, day.day)
+        label, mark = _day_label(s.getLunar(), s)
+        items.append({"t": "xday", "a": str(day.day), "b": label, "c": mark, "d": "p" if k < 0 else "n"})
     items.append(_upd())
     return items

@@ -15,6 +15,7 @@ from .channel import ChannelError, answer, open_request, register_device, seal
 from .crypto import derive_master_key_2, verify_challenge_response
 from .database import Database
 from .endpoints import handle_app_query
+from . import wxpusher
 from .security import (
     FetchRefused,
     client_ip as trusted_client_ip,
@@ -58,6 +59,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_raw(self, reply: Tuple[int, str, bytes]):
+        status, ctype, body = reply
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _wx_request(self, body: bytes = b"") -> Tuple[int, str, bytes]:
+        """/notify, /wxpusher/send and /wxpusher/logout: on a public server with
+        the admin's portal session or the device's own."""
+        token = self._session_token(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
+        public = getattr(self.server_ctx, "public", False)
+        return wxpusher.handle_request(self.path, body, public,
+                                       lambda mac: verify_admin_session(token) or (bool(mac) and check_user_session(token, mac)))
+
     def _send_html(self, html: str, status: int = 200):
         body = html.encode("utf-8")
         self.send_response(status)
@@ -100,6 +119,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
+
+        if path == "/notify":   # GET works too (phones, curl, a browser)
+            return self._send_raw(self._wx_request())
 
         # Health & Server Discovery API
         if path == "/health":
@@ -211,7 +233,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """A local proxy fetches from this network for clients on it; a public one never."""
         return not getattr(self.server_ctx, "public", False) and is_private_host(client_ip or "")
 
-    def _dispatch_proxy_url(self, path_with_query: str, client_ip: str = "") -> Tuple[int, str, bytes]:
+    def _dispatch_proxy_url(self, path_with_query: str, client_ip: str = "", device: str = "") -> Tuple[int, str, bytes]:
         if not client_ip:
             client_ip = self._get_client_ip()
         parsed = urllib.parse.urlparse(path_with_query)
@@ -234,7 +256,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             p_target = urllib.parse.urlparse(target_url)
             if p_target.path.startswith("/app/") or p_target.path == "/health":
                 sub_url = p_target.path + ("?" + p_target.query if p_target.query else "")
-                return handle_app_query(sub_url, client_ip=client_ip)
+                return handle_app_query(sub_url, client_ip=client_ip, device=device, public=self._public())
             try:
                 ctype, body = guarded_fetch(target_url, allow_private=self._allow_private(client_ip))
                 return 200, ctype, body
@@ -242,13 +264,19 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return 403, "text/plain", f"fetch refused: {e}".encode("utf-8")
             except Exception as e:
                 return 502, "text/plain", f"fetch error: {type(e).__name__}".encode("utf-8")
-        return handle_app_query(path_with_query, client_ip=client_ip)
+        return handle_app_query(path_with_query, client_ip=client_ip, device=device, public=self._public())
+
+    def _public(self) -> bool:
+        return bool(getattr(self.server_ctx, "public", False))
 
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         length = int(self.headers.get("Content-Length", 0))
         raw_body = self.rfile.read(length) if length > 0 else b""
+
+        if path in wxpusher.HTTP_PATHS:
+            return self._send_raw(self._wx_request(raw_body[:65536]))
 
         if path.startswith("/channel") and getattr(self.server_ctx, "protocol_mode", "both") == "unencrypted":
             return self._send_json({
@@ -600,7 +628,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return self._send_json({"error": e.message}, e.status)
         client_ip = self._get_client_ip()
         resp_status, resp_body = answer(method, url, body,
-                                        lambda p: self._dispatch_proxy_url(p, client_ip=client_ip),
+                                        lambda p: self._dispatch_proxy_url(p, client_ip=client_ip, device=device),
                                         allow_private=self._allow_private(client_ip))
         out = seal(k_resp, resp_status, resp_body)
         self.server_ctx.db.update_device_seen(device, client_ip)
@@ -622,6 +650,16 @@ class ProxyServer(http.server.ThreadingHTTPServer):
         self.admin_password = admin_password   # without config_path: fixed
         self.config_path = config_path         # with it: read again at each login
         self.db = Database(db_path)
+        wxpusher.set_state_dir(os.path.join(os.path.dirname(os.path.abspath(db_path)), "wxpusher"))
+        if config_path and os.path.exists(config_path):
+            import configparser
+            cfg = configparser.ConfigParser()
+            try:
+                cfg.read(config_path, encoding="utf-8")
+                wxpusher.set_sender(cfg.get("wxpusher", "app_token", fallback=""), cfg.get("wxpusher", "uids", fallback=""),
+                                    cfg.get("wxpusher", "topic_ids", fallback=""))
+            except configparser.Error:
+                pass
         self.recovery_challenges: dict = {}
         self.protocol_mode = (protocol_mode or "both").lower().strip()
         self.admin_login_delay = max(0, admin_login_delay or 0)

@@ -168,9 +168,13 @@ def cal_today(cd: str, wc: str = "", today: Optional[dt.date] = None) -> List[Di
     lu = s.getLunar()
     items = [{"t": "cdate", "a": f"{today.year}年{today.month}月{today.day}日", "b": "星期" + WEEK_CN[s.getWeek()],
               "c": today.isoformat()}]
+    # a: 九月十一, b: 丙午马年, c: 戊戌月 丁卯日, d: 属马  冲鸡(辛酉)煞西 (the year's
+    # animal; the animal and the stem-branch the day clashes with, its 煞 direction)
     items.append({"t": "lunar", "a": f"{lu.getMonthInChinese()}月{lu.getDayInChinese()}",
                   "b": f"{lu.getYearInGanZhi()}{lu.getYearShengXiao()}年",
-                  "c": f"{lu.getMonthInGanZhi()}月 {lu.getDayInGanZhi()}日"})
+                  "c": f"{lu.getMonthInGanZhi()}月 {lu.getDayInGanZhi()}日",
+                  "d": f"属{lu.getYearShengXiao()}  冲{lu.getDayChongShengXiao()}"
+                       f"({lu.getDayChongGan()}{lu.getDayChong()})煞{lu.getDaySha()}"})
     term = lu.getJieQi()
     nxt = lu.getNextJieQi()
     nd = nxt.getSolar()

@@ -12,6 +12,9 @@ def test_today_follows_the_day_and_the_settings():
     day = dt.date(2026, 10, 20)
     items = cal_today("", "", today=day)
     assert kinds(items, "cdate")[0]["c"] == "2026-10-20"
+    lunar = kinds(items, "lunar")[0]
+    assert (lunar["a"], lunar["b"], lunar["c"]) == ("九月十一", "丙午马年", "戊戌月 丁卯日")
+    assert lunar["d"] == "属马  冲鸡(辛酉)煞西"
     assert not kinds(items, "cd") and not kinds(items, "wclk")   # none asked, none given
     other = cal_today("", "", today=dt.date(2027, 1, 1))
     assert kinds(other, "lunar")[0]["a"] != kinds(items, "lunar")[0]["a"]

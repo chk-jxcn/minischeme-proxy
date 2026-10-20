@@ -501,11 +501,17 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 return self._send_json({"success": False, "error": "bad request"}, 400)
 
-            current = self.server_ctx.current_admin_password()[0]
+            current, source = self.server_ctx.current_admin_password()
             if current and secrets.compare_digest(str(pwd), current):
                 token = create_admin_session()
                 return self._send_json({"success": True, "token": token})
-            return self._send_json({"success": False, "error": "password incorrect"}, 403)
+            error = "password incorrect"
+            if not self.server_ctx.public and self.server_ctx.config_path and source in ("config", "default"):
+                # a local server says which file the password comes from
+                error = (f"密码不正确。本地服务使用的密码来自：{self.server_ctx.config_path} 的 [security] admin_password"
+                         if source == "config" else
+                         f"密码不正确。本地服务使用默认密码 admin（{self.server_ctx.config_path} 里没有设置 admin_password）")
+            return self._send_json({"success": False, "error": error}, 403)
 
         if path == "/api/admin/password":
             # a local server's password, written into its config.ini [security]

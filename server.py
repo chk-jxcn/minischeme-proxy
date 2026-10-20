@@ -341,6 +341,20 @@ def current_admin_password():
     return read_admin_password(server_config.config_file, password_deployment_public())
 
 
+def admin_login_error(source):
+    """Why a login failed: on the local service, where the password comes from
+    (the file the tray opens), so an edit of another copy is easy to spot;
+    the public service says nothing more."""
+    if password_deployment_public():
+        return "password incorrect"
+    where = {
+        "env": "环境变量 MINISCHEME_ADMIN_PASSWORD",
+        "config": f"{os.path.abspath(server_config.config_file)} 的 [security] admin_password",
+        "default": f"默认密码 admin（{os.path.abspath(server_config.config_file)} 里没有设置 admin_password）",
+    }.get(source, "")
+    return f"密码不正确。本地服务使用的密码来自：{where}" if where else "password incorrect"
+
+
 def ensure_config_file():
     """config.ini exists (the tray opens it for editing); its path."""
     path = server_config.config_file
@@ -922,11 +936,11 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 if server_config.admin_login_delay > 0:
                     time.sleep(server_config.admin_login_delay)
                 pwd = payload.get("password", "")
-                current = current_admin_password()[0]
+                current, source = current_admin_password()
                 if current and secrets.compare_digest(str(pwd), current):
                     token = create_admin_session()
                     return self._json_reply({"success": True, "token": token})
-                return self._json_reply({"success": False, "error": "password incorrect"}, 403)
+                return self._json_reply({"success": False, "error": admin_login_error(source)}, 403)
 
             if req_path == "/api/admin/password":
                 # a local server's password, written into config.ini [security]
@@ -1314,7 +1328,8 @@ class Win32SystemTray:
             user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(hmenu, MF_STRING, ID_OPEN_LAN, f"📡 本机 IP: {self.ip}  |  监听端口: {self.port}")
             user32.AppendMenuW(hmenu, MF_STRING, ID_COPY_PROXY, f"📋 复制局域网代理地址 ({lan_url})")
-            user32.AppendMenuW(hmenu, MF_STRING, ID_OPEN_CONFIG, "📝 打开配置文件 (config.ini)")
+            # the file this service reads (next to the exe / server.py, or --config)
+            user32.AppendMenuW(hmenu, MF_STRING, ID_OPEN_CONFIG, f"📝 打开配置文件 ({os.path.abspath(server_config.config_file)})")
             user32.AppendMenuW(hmenu, MF_STRING, ID_CHECK_RELEASE, "🔄 检查并下载最新 Release 版本")
             user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
             user32.AppendMenuW(hmenu, MF_STRING, ID_EXIT, "❌ 退出 MiniScheme 本地服务")

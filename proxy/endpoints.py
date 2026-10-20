@@ -1702,46 +1702,23 @@ def cal_sky(place: Dict[str, Any]) -> List[Dict[str, str]]:
     ]
 
 
-def get_calendar(view: str = "today", cd: str = "", wc: str = "", loc: str = "auto", client_ip: str = "") -> Dict[str, Any]:
-    """Provides calendar almanac, monthly grid, and sky phase data."""
-    import calendar as pycal
-    now_struct = time.localtime()
-    yr, mo, dy = now_struct.tm_year, now_struct.tm_mon, now_struct.tm_mday
-    wk_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    wk = wk_names[now_struct.tm_wday]
-
-    if view == "month":
-        first_wday, ndays = pycal.monthrange(yr, mo)
-        first_sun = (first_wday + 1) % 7
-        lunar_days = [
-            "初一", "初二", "初三", "初四", "初五", "初六", "初七", "初八", "初九", "初十",
-            "十一", "十二", "十三", "十四", "十五", "十六", "十七", "十八", "十九", "二十",
-            "廿一", "廿二", "廿三", "廿四", "廿五", "廿六", "廿七", "廿八", "廿九", "三十"
-        ]
-        items: List[Dict[str, str]] = [
-            {"t": "month", "a": f"{yr}年{mo:02d}月", "b": str(first_sun), "c": str(ndays), "d": str(dy)}
-        ]
-        for d in range(1, ndays + 1):
-            items.append({"t": "day", "a": str(d), "b": lunar_days[(d - 1) % 30], "c": ""})
-        items.append({"t": "upd", "a": time.strftime("%H:%M", now_struct)})
-        return {"items": items}
+def get_calendar(view: str = "today", cd: str = "", wc: str = "", loc: str = "auto", client_ip: str = "",
+                 ym: str = "") -> Dict[str, Any]:
+    """The calendar app's pages: today (the date, lunar date, solar terms,
+    festivals, 宜忌, the countdowns of cd and the world clocks of wc), the
+    month grid with lunar days, and the sun and moon (sky). All computed for
+    the actual day (proxy/calendar_data.py)."""
+    from .calendar_data import CalendarUnavailable, cal_month, cal_today
 
     if view == "sky":
         place = locate_place(loc, client_ip=client_ip)
         return {"items": cal_sky(place)}
-
-    items = [
-        {"t": "cdate", "a": f"{yr}年{mo:02d}月{dy:02d}日", "b": wk},
-        {"t": "lunar", "a": "九月十四", "b": "丙午年 戊戌月 辛卯日", "c": "属马  冲鸡(乙酉)煞西"},
-        {"t": "term", "a": "寒露", "b": "已过", "c": "霜降", "d": "7天后"},
-        {"t": "yi", "a": "祭祀 祈福 求嗣 开光 出行 解除 伐木 入宅 移徙 安床"},
-        {"t": "ji", "a": "嫁娶 动土 安葬 开市 破土"},
-        {"t": "wclk", "a": "美西", "b": "PDT", "c": "-25200"},
-        {"t": "wclk", "a": "新西兰", "b": "NZDT", "c": "46800"},
-        {"t": "cd", "a": "春节", "b": "105"},
-        {"t": "upd", "a": time.strftime("%H:%M", now_struct)}
-    ]
-    return {"items": items}
+    try:
+        if view == "month":
+            return {"items": cal_month(ym)}
+        return {"items": cal_today(cd, wc)}
+    except CalendarUnavailable as e:
+        return {"items": [{"t": "error", "a": str(e)}]}
 
 
 # ---------------------------------------------------------------------------
@@ -1810,7 +1787,8 @@ def handle_app_query(path_with_query: str, client_ip: str = ""):
             qs.get("cd", [""])[0],
             qs.get("wc", [""])[0],
             qs.get("loc", ["auto"])[0],
-            client_ip=effective_ip
+            client_ip=effective_ip,
+            ym=qs.get("ym", [""])[0]
         )
     elif path == "/app/usage":
         data = get_usage()

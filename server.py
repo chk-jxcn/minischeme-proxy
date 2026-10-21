@@ -437,14 +437,16 @@ def get_latest_github_release(repo="minischeme-webrepl", ttl=120):
         }
 
 
-def fetch_latest_release_asset(repo, asset_name):
-    """Fetch an asset from local bundle if available, otherwise from latest GitHub release."""
+def fetch_latest_release_asset(repo, asset_name, prefer_local=True):
+    """Fetch an asset from the local bundle if available, otherwise from the
+    latest GitHub release; prefer_local=False: the latest release only (the
+    flasher compares both by their manifests' versions)."""
     ctype = "application/json" if asset_name.endswith(".json") else "application/octet-stream"
 
     # Local bundle first (fastest, guaranteed match with current build)
     sub = "firmware" if repo == "minischeme-esp32" else "apps"
     local_candidate = os.path.join(BASE_DIR, sub, asset_name)
-    if os.path.isfile(local_candidate):
+    if prefer_local and os.path.isfile(local_candidate):
         with open(local_candidate, "rb") as f:
             return 200, ctype, f.read()
 
@@ -458,7 +460,7 @@ def fetch_latest_release_asset(repo, asset_name):
     for url in urls:
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "MiniScheme-WebREPL/1.0"})
-            with urllib.request.urlopen(req, timeout=6) as resp:
+            with urllib.request.urlopen(req, timeout=6 if asset_name.endswith(".json") else 30) as resp:
                 body = resp.read(32 * 1024 * 1024)
                 if len(body) > 0:
                     return 200, ctype, body
@@ -690,7 +692,8 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             if repo not in ("minischeme-webrepl", "minischeme-esp32", "minischeme-apps") or not asset or "/" in asset:
                 self.send_error(400, "invalid repo or asset")
                 return
-            status, ctype, body = fetch_latest_release_asset(repo, asset)
+            prefer_local = (qs.get("source") or [""])[0] != "github"
+            status, ctype, body = fetch_latest_release_asset(repo, asset, prefer_local)
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))

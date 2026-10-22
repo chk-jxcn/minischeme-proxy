@@ -101,6 +101,33 @@ class Database:
                     timestamp INTEGER NOT NULL
                 )
             """)
+            # the medicine app's records (proxy/medicine.py): kept until the
+            # device's owner clears them; names as the device last sent them
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS med_names (
+                    mac TEXT NOT NULL,
+                    med INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    unit TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (mac, med)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS med_records (
+                    mac TEXT NOT NULL,
+                    day INTEGER NOT NULL,
+                    slot TEXT NOT NULL,
+                    med INTEGER NOT NULL,
+                    how TEXT NOT NULL,
+                    at TEXT NOT NULL,
+                    amount INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    unit TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (mac, day, slot, med)
+                )
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS admin_config (
                     key TEXT PRIMARY KEY,
@@ -214,12 +241,17 @@ class Database:
         clean_mac = normalize_device_id(mac)
         with self._get_conn() as conn:
             conn.execute("DELETE FROM app_data WHERE mac = ? AND app_id = ?", (clean_mac, app_id))
+            if app_id == "medicine":     # its records too (proxy/medicine.py)
+                conn.execute("DELETE FROM med_records WHERE mac = ?", (clean_mac,))
+                conn.execute("DELETE FROM med_names WHERE mac = ?", (clean_mac,))
             conn.commit()
 
     def clear_all_app_data(self, mac: str):
         clean_mac = normalize_device_id(mac)
         with self._get_conn() as conn:
             conn.execute("DELETE FROM app_data WHERE mac = ?", (clean_mac,))
+            conn.execute("DELETE FROM med_records WHERE mac = ?", (clean_mac,))
+            conn.execute("DELETE FROM med_names WHERE mac = ?", (clean_mac,))
             conn.commit()
 
     def delete_device_account(self, mac: str):
@@ -228,6 +260,71 @@ class Database:
             conn.execute("DELETE FROM devices WHERE mac = ?", (clean_mac,))
             conn.execute("DELETE FROM app_data WHERE mac = ?", (clean_mac,))
             conn.execute("DELETE FROM access_logs WHERE mac = ?", (clean_mac,))
+            conn.execute("DELETE FROM med_records WHERE mac = ?", (clean_mac,))
+            conn.execute("DELETE FROM med_names WHERE mac = ?", (clean_mac,))
+            conn.commit()
+
+    # The medicine app's records (proxy/medicine.py) ------------------------------------
+
+    def med_put_names(self, mac: str, names: List[Tuple[int, str, str]]):
+        """(med, name, unit): the device's current names, used for records stored from now on."""
+        clean_mac = normalize_device_id(mac)
+        now = int(time.time())
+        with self._get_conn() as conn:
+            conn.executemany("""
+                INSERT INTO med_names (mac, med, name, unit, updated_at) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(mac, med) DO UPDATE SET name=excluded.name, unit=excluded.unit, updated_at=excluded.updated_at
+            """, [(clean_mac, m, n, u, now) for m, n, u in names])
+            conn.commit()
+
+    def med_put_records(self, mac: str, records: List[Tuple[int, str, int, str, str, int]]):
+        """(day, slot, med, how, at, amount): the device's copy replaces the stored one;
+        the name and unit the device last sent for the medicine go with it."""
+        clean_mac = normalize_device_id(mac)
+        now = int(time.time())
+        with self._get_conn() as conn:
+            names = {r["med"]: (r["name"], r["unit"]) for r in
+                     conn.execute("SELECT med, name, unit FROM med_names WHERE mac = ?", (clean_mac,))}
+            rows = []
+            for day, slot, med, how, at, amount in records:
+                name, unit = names.get(med, (f"药品 {med}", ""))
+                rows.append((clean_mac, day, slot, med, how, at, amount, name, unit, now))
+            conn.executemany("""
+                INSERT INTO med_records (mac, day, slot, med, how, at, amount, name, unit, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(mac, day, slot, med) DO UPDATE SET
+                    how=excluded.how, at=excluded.at, amount=excluded.amount,
+                    name=excluded.name, unit=excluded.unit, updated_at=excluded.updated_at
+            """, rows)
+            conn.commit()
+
+    def med_get_records(self, mac: str, from_day: int = 0, offset: int = 0, limit: int = 50,
+                        newest_first: bool = False) -> Tuple[List[Dict[str, Any]], int]:
+        """(records of day >= from_day, oldest first or newest first, the total)."""
+        clean_mac = normalize_device_id(mac)
+        order = "DESC" if newest_first else "ASC"
+        with self._get_conn() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM med_records WHERE mac = ? AND day >= ?",
+                                 (clean_mac, from_day)).fetchone()[0]
+            cur = conn.execute(f"""
+                SELECT day, slot, med, how, at, amount, name, unit, updated_at FROM med_records
+                WHERE mac = ? AND day >= ? ORDER BY day {order}, slot {order}, med ASC LIMIT ? OFFSET ?
+            """, (clean_mac, from_day, limit, offset))
+            return [dict(r) for r in cur.fetchall()], total
+
+    def med_summary(self, mac: str) -> Tuple[int, int, int]:
+        """(records, first day, last day); 0s without records."""
+        clean_mac = normalize_device_id(mac)
+        with self._get_conn() as conn:
+            n, first, last = conn.execute("SELECT COUNT(*), MIN(day), MAX(day) FROM med_records WHERE mac = ?",
+                                          (clean_mac,)).fetchone()
+            return n, first or 0, last or 0
+
+    def med_clear(self, mac: str):
+        clean_mac = normalize_device_id(mac)
+        with self._get_conn() as conn:
+            conn.execute("DELETE FROM med_records WHERE mac = ?", (clean_mac,))
+            conn.execute("DELETE FROM med_names WHERE mac = ?", (clean_mac,))
             conn.commit()
 
     def admin_list_devices(self) -> List[Dict[str, Any]]:

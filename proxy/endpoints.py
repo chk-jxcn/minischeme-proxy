@@ -1738,10 +1738,14 @@ def get_usage() -> Dict[str, Any]:
     }
 
 
-def handle_app_query(path_with_query: str, client_ip: str = "", device: str = "", public: bool = False):
+def handle_app_query(path_with_query: str, client_ip: str = "", device: str = "", public: bool = False,
+                     plain_device: str = "", db=None):
     """Unified dispatcher for /app/* and /fetch requests. device: the device id
     of an encrypted channel request ("" for plaintext); public: a server on
-    the internet (per-device WxPusher logins and message lists)."""
+    the internet (per-device WxPusher logins and message lists); plain_device:
+    a plain request's X-MiniScheme-Device (the medicine records' owner on a
+    local server or for a simulator, see proxy/medicine.py); db: the
+    server's Database (the medicine records)."""
     import urllib.parse
     import json as _json
     parsed = urllib.parse.urlparse(path_with_query)
@@ -1798,6 +1802,9 @@ def handle_app_query(path_with_query: str, client_ip: str = "", device: str = ""
     elif path in ("/app/wxpusher", "/app/notifier"):
         from .wxpusher import app_items
         data = {"items": app_items(path, {k: v[0] for k, v in qs.items()}, device, public)}
+    elif path == "/app/medicine":
+        from .medicine import app_items as medicine_items
+        data = {"items": medicine_items(qs, device, plain_device, public, db)}
     elif path == "/app/usage":
         data = get_usage()
     elif path == "/app/ping" or path == "/health":

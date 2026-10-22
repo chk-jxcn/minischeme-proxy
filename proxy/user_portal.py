@@ -81,6 +81,17 @@ th { background: #f1f5f9; color: #475569; }
       <tbody></tbody>
     </table>
 
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:30px; flex-wrap:wrap; gap:10px;">
+      <h3 style="margin:0;">服药记录 <span id="med-total" class="badge"></span></h3>
+      <button class="danger" style="padding:6px 14px; font-size:13px;" onclick="clearMedRecords()">清空服务器上的服药记录</button>
+    </div>
+    <p style="margin:6px 0 0; color:#64748b; font-size:13px;">吃药提醒应用打开“同步到应用服务器”后上传的记录，按日期从新到旧；以设备上的记录为准，设备上修改后会重新上传。</p>
+    <table id="med-table">
+      <thead><tr><th>日期</th><th>服药时间</th><th>药品</th><th>用量</th><th>结果</th><th>确认时间</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div style="margin-top:10px;"><button id="med-more" class="secondary hidden" onclick="loadMedRecords(true)">加载更多</button></div>
+
     <h3 style="margin-top:30px;">近期 API 访问审计日志</h3>
     <table id="log-table">
       <thead><tr><th>时间</th><th>来源 IP</th><th>方法</th><th>接口</th><th>状态</th><th>数据量</th></tr></thead>
@@ -246,6 +257,8 @@ async function loadDashboard() {
       tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#94a3b8;">暂无存储数据</td></tr>';
     }
 
+    await loadMedRecords(false);
+
     // Load logs
     const rLogs = await fetch(`/api/user/logs?mac=${encodeURIComponent(curMac)}`, { headers: authHeaders() });
     const dLogs = await rLogs.json();
@@ -265,6 +278,42 @@ async function loadDashboard() {
   }
 }
 
+/* The medicine app's records, 100 at a time */
+let medOffset = 0;
+const MED_HOW = {ok: '已服', miss: '超时未服', skip: '未服', auto: '超时（记为已服）'};
+function medDate(day) {
+  const d = new Date(day * 86400000);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+function medAmount(a, unit) {
+  const n = Number(a) || 0;
+  return (n % 10 ? (n / 10).toFixed(1) : String(n / 10)) + (unit ? ' ' + unit : '');
+}
+async function loadMedRecords(more) {
+  if (!more) medOffset = 0;
+  const r = await fetch(`/api/user/med_records?mac=${encodeURIComponent(curMac)}&off=${medOffset}&lim=100`, { headers: authHeaders() });
+  const d = await r.json();
+  if (!d.success) return;
+  const tbody = document.querySelector('#med-table tbody');
+  if (!more) tbody.innerHTML = '';
+  (d.items || []).forEach(x => {
+    const tr = document.createElement('tr');
+    const how = MED_HOW[x.how] || x.how;
+    tr.innerHTML = `<td>${medDate(x.day)}</td><td>${esc(x.slot)}</td><td>${esc(x.name)}</td><td>${esc(medAmount(x.amount, x.unit))}</td>` +
+                   `<td style="color:${x.how === 'ok' || x.how === 'auto' ? '#16a34a' : '#dc2626'}">${esc(how)}</td><td>${esc(x.at || '')}</td>`;
+    tbody.appendChild(tr);
+  });
+  medOffset += (d.items || []).length;
+  if (!medOffset) tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#94a3b8;">没有服药记录</td></tr>';
+  document.getElementById('med-total').innerText = d.total ? `共 ${d.total} 条` : '';
+  document.getElementById('med-more').classList.toggle('hidden', medOffset >= (d.total || 0));
+}
+async function clearMedRecords() {
+  if (!confirm('确认清空服务器上这台设备的全部服药记录？设备上的记录不受影响，但已经上传过的不会再上传。')) return;
+  await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=medicine`, { method: 'POST', headers: authHeaders() });
+  loadDashboard();
+}
+
 async function clearApp(appId) {
   if (!confirm(`确认清空应用 ${appId} 的所有数据？`)) return;
   await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=${encodeURIComponent(appId)}`, { method: 'POST', headers: authHeaders() });
@@ -272,7 +321,7 @@ async function clearApp(appId) {
 }
 
 async function clearAllData() {
-  if (!confirm(`确认一键清空该设备 (${curMac}) 的所有应用配置数据？`)) return;
+  if (!confirm(`确认一键清空该设备 (${curMac}) 的所有应用数据？服务器上的服药记录也会一起删除。`)) return;
   await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=all`, { method: 'POST', headers: authHeaders() });
   loadDashboard();
 }

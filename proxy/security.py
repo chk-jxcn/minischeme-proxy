@@ -148,6 +148,8 @@ def redact_url(url: str) -> str:
     if not p.query:
         return url
     pairs = urllib.parse.parse_qsl(p.query, keep_blank_values=True)
+    if p.path.endswith("/app/medicine"):     # health records: only what was asked
+        pairs = [(k, v) for k, v in pairs if k == "op"]
     safe = [(k, "***" if (_SECRET_PARAM_RE.search(k) and v) else v) for k, v in pairs]
     return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, urllib.parse.urlencode(safe, safe="*,:"), p.fragment))
 

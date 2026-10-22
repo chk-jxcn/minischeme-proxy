@@ -53,6 +53,10 @@ if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = BASE_DIR
+# config.ini, the device database and wxpusher/ elsewhere (tools/sim.py --fresh: a temporary one)
+if os.environ.get("MINISCHEME_DATA_DIR"):
+    DATA_DIR = os.path.abspath(os.environ["MINISCHEME_DATA_DIR"])
+    os.makedirs(DATA_DIR, exist_ok=True)
 
 TOOLS_DIR = os.path.join(BASE_DIR, "tools")
 if not os.path.exists(TOOLS_DIR):
@@ -512,7 +516,8 @@ def handle_proxy_endpoint(path_with_query, client_ip="", device="", forward_devi
         if p_target.path.startswith("/app/") or p_target.path == "/health":
             sub_url = p_target.path + ("?" + p_target.query if p_target.query else "")
             from proxy.endpoints import handle_app_query
-            return handle_app_query(sub_url, client_ip=client_ip, device=device, public=server_config.is_public())
+            return handle_app_query(sub_url, client_ip=client_ip, device=device, public=server_config.is_public(),
+                                    plain_device=forward_device, db=_proxy_db())
         try:
             ctype, body = guarded_fetch(target_url, allow_private=fetch_allows_private(client_ip))
             return 200, ctype, body
@@ -522,7 +527,14 @@ def handle_proxy_endpoint(path_with_query, client_ip="", device="", forward_devi
             return 502, "text/plain", f"fetch error: {type(e).__name__}".encode("utf-8")
 
     from proxy.endpoints import handle_app_query
-    return handle_app_query(path_with_query, client_ip=client_ip, device=device, public=server_config.is_public())
+    return handle_app_query(path_with_query, client_ip=client_ip, device=device, public=server_config.is_public(),
+                            plain_device=forward_device, db=_proxy_db())
+
+
+def _proxy_db():
+    """The device database (None when it cannot be opened)."""
+    proxy_ctx.ensure_initialized()
+    return proxy_ctx.db
 
 
 def handle_wx_request(handler, body=b""):
@@ -598,6 +610,20 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
     def _get_client_ip(self) -> str:
         peer = str(self.client_address[0]) if getattr(self, "client_address", None) else ""
         return _trusted_client_ip(peer, self.headers)
+
+    def _device_auth(self):
+        """(device, plain device, problem) of a device's plain request: its
+        X-MiniScheme-Device and X-MiniScheme-Password (proxy/device_auth.py)."""
+        if not self.headers.get("X-MiniScheme-Password"):
+            from proxy.security import device_header
+            from proxy.database import normalize_device_id
+            plain = device_header(self.headers.get("X-MiniScheme-Device", ""))
+            return "", normalize_device_id(plain) if plain else "", ""
+        proxy_ctx.ensure_initialized()
+        if proxy_ctx.db is None:
+            return "", "", "the server has no device database"
+        from proxy.device_auth import authenticate
+        return authenticate(proxy_ctx.db, proxy_ctx.master_key_1, self.headers, self._get_client_ip())
 
     def _session_token(self, qs=None, payload=None) -> str:
         """The portal session token: X-Session-Token header (or the older
@@ -727,8 +753,11 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     "error": "Plaintext protocol is disabled on this server. Encrypted channel protocol (MSC1) is required."
                 }, status=403)
                 return
+            device, plain_device, problem = self._device_auth()
+            if problem:
+                return self._json_reply({"success": False, "error": problem}, status=403)
             status, ctype, body = handle_proxy_endpoint(self.path, client_ip=self._get_client_ip(),
-                                                        forward_device=self.headers.get("X-MiniScheme-Device", ""))
+                                                        device=device, forward_device=plain_device)
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -737,6 +766,17 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
+        # The device page's test button: the device and its app service password
+        # (headers) as this server knows them; registers nothing
+        if req_path == "/device/check":
+            if "proxy" not in server_config.components:
+                self.send_error(404, "Proxy component is disabled on this server")
+                return
+            proxy_ctx.ensure_initialized()
+            from proxy.device_auth import check
+            status, detail = check(proxy_ctx.db, self.headers, self._get_client_ip())
+            return self._json_reply({"success": True, "status": status, "detail": detail})
 
         # 3. Simulator CORS proxy (/api/fetch?url=... or /api/lhm?url=...)
         if self.path.startswith("/api/fetch?") or self.path.startswith("/api/lhm?"):
@@ -883,6 +923,13 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 if not check_user_session(token, mac):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 return self._json_reply({"success": True, "items": proxy_ctx.db.get_device_logs(mac)})
+            if req_path == "/api/user/med_records":   # the medicine app's records, newest first
+                mac = qs.get("mac", [""])[0]
+                token = self._session_token(qs)
+                if not check_user_session(token, mac):
+                    return self._json_reply({"success": False, "error": "unauthorized"}, 401)
+                from proxy.medicine import portal_page
+                return self._json_reply(portal_page(proxy_ctx.db, mac, qs))
 
         if "webrepl" not in server_config.components:
             body = (

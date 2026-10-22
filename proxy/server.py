@@ -124,6 +124,11 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         if path == "/notify":   # GET works too (phones, curl, a browser)
             return self._send_raw(self._wx_request())
 
+        if path == "/device/check":   # the device page's test button: registers nothing
+            from .device_auth import check
+            status, detail = check(self.server_ctx.db, self.headers, self._get_client_ip())
+            return self._send_json({"success": True, "status": status, "detail": detail})
+
         # Health & Server Discovery API
         if path == "/health":
             return self._send_json({
@@ -174,6 +179,14 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             items = self.server_ctx.db.get_device_logs(mac)
             return self._send_json({"success": True, "items": items})
 
+        if path == "/api/user/med_records":   # the medicine app's records, newest first
+            mac = qs.get("mac", [""])[0]
+            token = self._session_token(qs)
+            if not check_user_session(token, mac):
+                return self._send_json({"success": False, "error": "unauthorized"}, 401)
+            from .medicine import portal_page
+            return self._send_json(portal_page(self.server_ctx.db, mac, qs))
+
         # Admin API
         if path == "/api/admin/status":
             # app_proxy.py always has an admin password: the portal asks for it
@@ -206,7 +219,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     "success": False,
                     "error": "Plaintext protocol is disabled on this server. Encrypted channel protocol (MSC1) is required."
                 }, 403)
-            status, ctype, body = self._dispatch_proxy_url(self.path, forward_device=self.headers.get("X-MiniScheme-Device", ""))
+            from .device_auth import authenticate
+            device, plain_device, problem = authenticate(self.server_ctx.db, self.server_ctx.master_key_1,
+                                                         self.headers, self._get_client_ip())
+            if problem:
+                return self._send_json({"success": False, "error": problem}, 403)
+            status, ctype, body = self._dispatch_proxy_url(self.path, device=device, forward_device=plain_device)
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -261,7 +279,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             p_target = urllib.parse.urlparse(target_url)
             if p_target.path.startswith("/app/") or p_target.path == "/health":
                 sub_url = p_target.path + ("?" + p_target.query if p_target.query else "")
-                return handle_app_query(sub_url, client_ip=client_ip, device=device, public=self._public())
+                return handle_app_query(sub_url, client_ip=client_ip, device=device, public=self._public(),
+                                        plain_device=forward_device, db=self.server_ctx.db)
             try:
                 ctype, body = guarded_fetch(target_url, allow_private=self._allow_private(client_ip))
                 return 200, ctype, body
@@ -269,7 +288,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return 403, "text/plain", f"fetch refused: {e}".encode("utf-8")
             except Exception as e:
                 return 502, "text/plain", f"fetch error: {type(e).__name__}".encode("utf-8")
-        return handle_app_query(path_with_query, client_ip=client_ip, device=device, public=self._public())
+        return handle_app_query(path_with_query, client_ip=client_ip, device=device, public=self._public(),
+                                plain_device=forward_device, db=self.server_ctx.db)
 
     def _public(self) -> bool:
         return bool(getattr(self.server_ctx, "public", False))

@@ -22,7 +22,7 @@ from .security import FetchRefused, guarded_fetch
 CHANNEL_SKEW = 300
 CHANNEL_MAX = 64 * 1024
 LOCAL_PATHS = ("/app/", "/market/")
-LOCAL_EXACT = ("/health", "/fetch")
+LOCAL_EXACT = ("/health", "/fetch", "/relay")
 
 _seen = {}
 _seen_lock = threading.Lock()

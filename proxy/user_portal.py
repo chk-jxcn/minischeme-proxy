@@ -40,16 +40,16 @@ th { background: #f1f5f9; color: #475569; }
 
   <div id="login-section" class="card">
     <div style="border-bottom: 1px solid var(--border); margin-bottom: 18px; display:flex;">
-      <button class="tab-btn active" id="tab-hw-btn" onclick="switchLoginTab('hw')">📱 物理硬件设备 (MAC + 硬件密码)</button>
+      <button class="tab-btn active" id="tab-hw-btn" onclick="switchLoginTab('hw')">📱 物理硬件设备 (MAC + 应用服务密码)</button>
       <button class="tab-btn" id="tab-sim-btn" onclick="switchLoginTab('sim')">🎮 WASM 模拟器 (UUID 免密登录)</button>
     </div>
 
     <!-- 硬件设备登录面板 -->
     <div id="login-hw-panel">
-      <p style="margin-top:0;">请输入硬件背面的 MAC 地址与初次配网设置的硬件密码：</p>
+      <p style="margin-top:0;">请输入设备的 MAC 地址，以及设备上为这台服务器设置的应用服务密码（v1.0.65 以前的固件用的是硬件密码）：</p>
       <div style="display:flex; gap:10px; flex-wrap:wrap;">
         <input type="text" id="mac-input" placeholder="MAC地址 (例如 C8F09EB36C90)" style="flex:1; min-width:200px;">
-        <input type="password" id="pwd-input" placeholder="硬件密码" style="flex:1; min-width:200px;">
+        <input type="password" id="pwd-input" placeholder="应用服务密码" style="flex:1; min-width:200px;">
         <button onclick="doHwLogin()">安全登录</button>
       </div>
     </div>
@@ -120,7 +120,7 @@ function doLogin() { return doHwLogin(); }
 async function doHwLogin() {
   const macRaw = document.getElementById('mac-input').value.trim();
   const pwd = document.getElementById('pwd-input').value;
-  if (!macRaw || !pwd) return alert('请输入 MAC 地址和硬件密码');
+  if (!macRaw || !pwd) return alert('请输入 MAC 地址和应用服务密码');
   const mac = macRaw.replace(/[:-]/g, '').toUpperCase();
   const msgEl = document.getElementById('login-msg');
   msgEl.innerText = '正在验证挑战与凭据...';
@@ -371,7 +371,7 @@ def verify_user_login(mac: str, client_hash: str, nonce: str, db) -> Tuple[bool,
 
     expected = hashlib.sha256(dev["hardware_hash_key"] + nonce.encode("ascii")).hexdigest()
     if not secrets.compare_digest(expected, client_hash):
-        return False, "硬件密码校验失败"
+        return False, "应用服务密码校验失败"
 
     token = create_user_session(clean_mac)
     return True, token

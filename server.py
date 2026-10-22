@@ -476,11 +476,17 @@ def fetch_allows_private(client_ip):
     return not server_config.is_public() and is_private_host(client_ip or "")
 
 
-def handle_proxy_endpoint(path_with_query, client_ip="", device=""):
-    """Dispatch /app/*, /health, and /market/* requests in-process (device:
-    the id of an encrypted channel request)."""
+def handle_proxy_endpoint(path_with_query, client_ip="", device="", forward_device=""):
+    """Dispatch /app/*, /health, /relay and /market/* requests in-process
+    (device: the id of an encrypted channel request; forward_device: the id
+    /relay passes on to the app server, the plain request's own header)."""
     parsed = urllib.parse.urlparse(path_with_query)
     path = parsed.path
+
+    if path == "/relay":
+        from proxy.security import relay_fetch
+        target = (urllib.parse.parse_qs(parsed.query).get("url") or [""])[0]
+        return relay_fetch(target, device or forward_device, fetch_allows_private(client_ip))
 
     if path.startswith("/market/"):
         rel = urllib.parse.unquote(path[len("/market/"):])
@@ -706,11 +712,11 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
         if req_path == "/notify" and "proxy" in server_config.components:
             return self._wx_reply(handle_wx_request(self))
 
-        # 2. Direct App Proxy & Market endpoints (/app/*, /market/*, /fetch)
+        # 2. Direct App Proxy & Market endpoints (/app/*, /market/*, /fetch, /relay)
         if (
             req_path.startswith("/app/")
             or req_path.startswith("/market/")
-            or req_path == "/fetch"
+            or req_path in ("/fetch", "/relay")
         ):
             if "proxy" not in server_config.components:
                 self.send_error(404, "Proxy component is disabled on this server")
@@ -721,7 +727,8 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     "error": "Plaintext protocol is disabled on this server. Encrypted channel protocol (MSC1) is required."
                 }, status=403)
                 return
-            status, ctype, body = handle_proxy_endpoint(self.path, client_ip=self._get_client_ip())
+            status, ctype, body = handle_proxy_endpoint(self.path, client_ip=self._get_client_ip(),
+                                                        forward_device=self.headers.get("X-MiniScheme-Device", ""))
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -745,14 +752,27 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed_self.query)
             url = (query.get("url") or [""])[0]
             parsed = urllib.parse.urlparse(url)
-            if parsed.scheme in ("http", "https") and (
+            from proxy.security import device_header
+            sim_device = device_header(self.headers.get("X-MiniScheme-Device", ""))
+            # this server's own endpoints are answered here only when the URL names
+            # this server (or the proxies it stands in for); an app's own server
+            # elsewhere is fetched, with the simulator's id
+            here = {"127.0.0.1", "localhost", "proxy.local", "converter.local", "124.222.231.186",
+                    (self.headers.get("Host") or "").split(":")[0].lower()}
+            try:
+                here.add(get_primary_ip())
+            except Exception:
+                pass
+            own = (parsed.hostname or "").lower() in here
+            if parsed.scheme in ("http", "https") and own and (
                 parsed.path.startswith("/app/")
-                or parsed.path == "/fetch"
+                or parsed.path in ("/fetch", "/relay")
                 or parsed.path.startswith("/market/")
                 or parsed.path == "/health"
             ):
                 p_query = parsed.path + ("?" + parsed.query if parsed.query else "")
-                status, ctype, body = handle_proxy_endpoint(p_query, client_ip=self._get_client_ip())
+                status, ctype, body = handle_proxy_endpoint(p_query, client_ip=self._get_client_ip(),
+                                                            forward_device=sim_device)
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
@@ -763,11 +783,18 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             image = parsed.path.endswith((".msbc", ".fasl"))
-            if parsed.scheme not in ("http", "https") or not (parsed.path.endswith(".json") or image):
+            # a public server fetches JSON documents and app images only; a local
+            # one any path of an app's own server (developing one)
+            if parsed.scheme not in ("http", "https") or (
+                    server_config.is_public() and not (parsed.path.endswith(".json") or image)):
                 self.send_error(400, "url must be http(s)://<host>/<path>.json, an app image or an app proxy URL (/app/...)")
                 return
+            headers = {"User-Agent": "MiniScheme-Proxy/1.0"}
+            if sim_device:
+                headers["X-MiniScheme-Device"] = sim_device
             try:
-                _, body = guarded_fetch(url, allow_private=fetch_allows_private(self._get_client_ip()), timeout=4)
+                _, body = guarded_fetch(url, allow_private=fetch_allows_private(self._get_client_ip()), timeout=4,
+                                        headers=headers)
                 status = 200
             except FetchRefused as e:
                 body = f"fetch refused: {e}".encode("utf-8")
@@ -1139,6 +1166,9 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 if "hardware_hash_key" in payload:
                     hw_hash_key = bytes.fromhex(payload["hardware_hash_key"])
                     dev = proxy_ctx.db.get_device(mac)
+                    if not dev and payload.get("check"):
+                        # the device's settings page tests a password: nothing is registered
+                        return self._json_reply({"success": True, "status": "new", "time": int(time.time())})
                     if dev:
                         ch_nonce = secrets.token_bytes(32)
                         proxy_ctx.recovery_challenges[mac] = (ch_nonce, time.time() + 60)
@@ -1194,7 +1224,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE, HEAD")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range, Cache-Control, Pragma")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, X-MiniScheme-Device, Authorization, X-Requested-With, Range, Cache-Control, Pragma")
         self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, X-MiniScheme-Auth")
         self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Access-Control-Max-Age", "86400")

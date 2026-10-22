@@ -22,6 +22,7 @@ from .security import (
     cors_origin,
     guarded_fetch,
     is_private_host,
+    relay_fetch,
     safe_join,
 )
 from .user_portal import (
@@ -109,7 +110,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE, HEAD")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, Authorization, X-Requested-With, Range, Cache-Control, Pragma")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, X-MiniScheme-Device, Authorization, X-Requested-With, Range, Cache-Control, Pragma")
         self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, X-MiniScheme-Auth")
         self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Access-Control-Max-Age", "86400")
@@ -199,13 +200,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             return self._send_json({"success": True, "items": items})
 
         # Plain app & market endpoints (/app/*, /market/*, /fetch)
-        if path.startswith("/app/") or path.startswith("/market/") or path == "/fetch":
+        if path.startswith("/app/") or path.startswith("/market/") or path in ("/fetch", "/relay"):
             if getattr(self.server_ctx, "protocol_mode", "both") == "encrypted":
                 return self._send_json({
                     "success": False,
                     "error": "Plaintext protocol is disabled on this server. Encrypted channel protocol (MSC1) is required."
                 }, 403)
-            status, ctype, body = self._dispatch_proxy_url(self.path)
+            status, ctype, body = self._dispatch_proxy_url(self.path, forward_device=self.headers.get("X-MiniScheme-Device", ""))
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -233,11 +234,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         """A local proxy fetches from this network for clients on it; a public one never."""
         return not getattr(self.server_ctx, "public", False) and is_private_host(client_ip or "")
 
-    def _dispatch_proxy_url(self, path_with_query: str, client_ip: str = "", device: str = "") -> Tuple[int, str, bytes]:
+    def _dispatch_proxy_url(self, path_with_query: str, client_ip: str = "", device: str = "",
+                            forward_device: str = "") -> Tuple[int, str, bytes]:
         if not client_ip:
             client_ip = self._get_client_ip()
         parsed = urllib.parse.urlparse(path_with_query)
         path = parsed.path
+        if path == "/relay":   # an app server through this converter, with the device id
+            target = (urllib.parse.parse_qs(parsed.query).get("url") or [""])[0]
+            return relay_fetch(target, device or forward_device, self._allow_private(client_ip))
         if path.startswith("/market/"):
             rel = urllib.parse.unquote(path[len("/market/"):])
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -397,6 +402,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 hw_hash_hex = payload["hardware_hash_key"]
                 hw_hash_key = bytes.fromhex(hw_hash_hex)
                 dev = self.server_ctx.db.get_device(mac)
+                if not dev and payload.get("check"):
+                    # the device's settings page tests a password: nothing is registered
+                    return self._send_json({"success": True, "status": "new", "time": int(time.time())})
                 if dev:
                     # Device already has data on server: trigger challenge-response (Step 4)
                     ch_nonce = secrets.token_bytes(32)

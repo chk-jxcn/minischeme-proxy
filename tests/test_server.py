@@ -236,3 +236,61 @@ def test_weather_ip_geolocation(proxy_server):
 
 
 
+
+
+def _post(url, obj):
+    req = urllib.request.Request(url, data=json.dumps(obj).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode() or "{}")
+
+
+def test_auth_check_registers_nothing(proxy_server):
+    """The settings page's password test: a new device is only reported."""
+    base_url, _, db_path = proxy_server
+    mac = "C0FFEE000001"
+    hash_hex = derive_hardware_hash_key("svc-password", mac).hex()
+    st, r = _post(f"{base_url}/channel/auth", {"mac": mac, "hardware_hash_key": hash_hex, "check": True})
+    assert st == 200 and r["status"] == "new"
+    st, r = _post(f"{base_url}/channel/auth", {"mac": mac, "hardware_hash_key": hash_hex, "check": True})
+    assert r["status"] == "new"                       # still not registered
+    st, r = _post(f"{base_url}/channel/auth", {"mac": mac, "hardware_hash_key": hash_hex})
+    assert r["status"] == "registered"
+    st, r = _post(f"{base_url}/channel/auth", {"mac": mac, "hardware_hash_key": hash_hex, "check": True})
+    assert r["status"] == "challenge_required"        # known: the password is proved
+
+
+def test_relay_forwards_the_device_id(proxy_server):
+    """/relay?url=: an app server reached through the converter gets the device id."""
+    import http.server
+    seen = {}
+
+    class App(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["device"] = self.headers.get("X-MiniScheme-Device")
+            seen["path"] = self.path
+            body = b'{"items":[{"t":"ok"}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    app = http.server.HTTPServer(("127.0.0.1", 18095), App)
+    threading.Thread(target=app.serve_forever, daemon=True).start()
+    try:
+        base_url, _, _ = proxy_server
+        target = urllib.parse.quote("http://127.0.0.1:18095/app/mine?x=1", safe="")
+        req = urllib.request.Request(f"{base_url}/relay?url={target}", headers={"X-MiniScheme-Device": "A1B2C3D4E5F6"})
+        with urllib.request.urlopen(req) as r:
+            assert json.loads(r.read().decode())["items"][0]["t"] == "ok"
+        assert seen == {"device": "A1B2C3D4E5F6", "path": "/app/mine?x=1"}   # not answered by the proxy itself
+    finally:
+        app.shutdown()
+        app.server_close()

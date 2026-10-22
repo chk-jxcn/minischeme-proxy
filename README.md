@@ -17,7 +17,7 @@ A high-performance application proxy, protocol converter, and device management 
   - Detailed access logs and IP tracking.
   - Multi-tier in-memory TTL caching (weather 10m, news 5m, stocks 15s).
 - **Web Portals**:
-  - **User portal (`/user`)**: MAC + hardware password; the page derives the hash key itself and sends only `SHA-256(hash key || nonce)`. Simulator users log in with their UUID. Shows access logs and masked data; clears data or deletes the account.
+  - **User portal (`/user`)**: MAC + the app service password the device has for this server (its `<key>_password`; firmware before 1.0.65 used the hardware password); the page derives the hash key itself and sends only `SHA-256(hash key || nonce)`. Simulator users log in with their UUID. Shows access logs and masked data; clears data or deletes the account.
   - **Admin portal (`/admin`)**: all devices and their data in plain text. Needs `[security] admin_password`; logins wait `admin_login_delay` seconds; the session token travels in the `X-Session-Token` header.
 - **Safety rules**:
   - `/market/<file>` serves only files inside `apps/`; `/fetch?url=` reaches internet hosts only (every redirect re-checked).
@@ -28,6 +28,8 @@ A high-performance application proxy, protocol converter, and device management 
 - **Real data only**: market endpoints never invent values; e.g. `/app/crypto` takes the first of OKX, Binance (`data-api.binance.vision`, reachable from mainland China) and Huobi that answers (a failing source is skipped for 5 minutes), USD/CNY from OKX or Sina, and answers 502 when no source responds, so the board keeps its last data.
 
 - **WxPusher and notifier**: `/app/wxpusher` is a WxPusher client (`proxy/wxpusher.py`): it logs in with a QR code scanned in WeChat (drawn by `proxy/qr.py`, sent to the board as bitmap rows) and keeps the messages pushed to the user; the board deletes (`del=`) and logs out (`logout=1`) through its feed URL. `/app/notifier` shows what was pushed to `GET/POST /notify?text=&title=&level=info|warn|urgent&from=&wx=1`. A local server keeps one login and one message list for the boards of its network; a public one keeps them per device (the encrypted channel names the device; plaintext requests get none), and `/notify` there needs `to=<device id>` and the admin's or that device's portal session (`X-Session-Token`). `wx=1` and `POST /wxpusher/send` use the server's own `[wxpusher] app_token` and `uids` (or `topic_ids`) from config.ini. Logins are kept in `wxpusher/` next to the database.
+
+- **App servers without encryption**: `/relay?url=<url>` fetches an app's own server for a device (an app server configured without an app service password and `proxy_url_relay = 1`) and passes the device id on in `X-MiniScheme-Device` (the authenticated one over the channel, the device's own header over plain HTTP). `/channel/auth` with `"check": true` registers nothing (the device's 测试连接 button): an unknown device gets `{"status": "new"}`. The simulator's `/api/fetch` of an app's own server (not this server's endpoints) carries the simulator's id the same way.
 
 ## Installation & Running
 

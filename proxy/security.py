@@ -110,6 +110,32 @@ def guarded_fetch(url: str, allow_private: bool = False, max_bytes: int = 512 * 
         return resp.headers.get("Content-Type", "application/octet-stream"), body
 
 
+def device_header(value: str) -> str:
+    """A device id from an X-MiniScheme-Device header (12 hex digits, or a
+    simulator's id of letters, digits and -), '' when it is not one."""
+    v = (value or "").strip()
+    return v if re.fullmatch(r"[0-9A-Za-z-]{4,40}", v) else ""
+
+
+def relay_fetch(target: str, device: str, allow_private: bool):
+    """(status, content type, body) of GET /relay?url=target: an app server
+    reached through this converter for a device; it gets the device's id in
+    X-MiniScheme-Device (over the encrypted channel the authenticated one,
+    over plain HTTP the device's own header)."""
+    if not target.startswith(("http://", "https://")):
+        return 400, "text/plain", b"missing or invalid url"
+    headers = {"User-Agent": "MiniScheme-Proxy/1.0"}
+    if device_header(device):
+        headers["X-MiniScheme-Device"] = device_header(device)
+    try:
+        ctype, body = guarded_fetch(target, allow_private=allow_private, headers=headers)
+        return 200, ctype, body
+    except FetchRefused as e:
+        return 403, "text/plain", f"relay refused: {e}".encode("utf-8")
+    except Exception as e:
+        return 502, "text/plain", f"relay error: {type(e).__name__}".encode("utf-8")
+
+
 _SECRET_PARAM_RE = re.compile(r"(token|key|auth|pass|pwd|secret|sig|uid)", re.I)
 
 

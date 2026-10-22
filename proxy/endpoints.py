@@ -1792,6 +1792,9 @@ def handle_app_query(path_with_query: str, client_ip: str = "", device: str = ""
             client_ip=effective_ip,
             ym=qs.get("ym", [""])[0]
         )
+    elif path == "/app/tide":
+        from .tide import get_tide
+        data = get_tide(locate_place(qs.get("loc", ["auto"])[0], effective_ip))
     elif path in ("/app/wxpusher", "/app/notifier"):
         from .wxpusher import app_items
         data = {"items": app_items(path, {k: v[0] for k, v in qs.items()}, device, public)}

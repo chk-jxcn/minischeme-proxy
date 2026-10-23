@@ -28,3 +28,7 @@ Thumbs.db
 
 # Market apps cache
 apps/
+
+# Font server data (uploaded fonts, order) and its local config
+fontdata/
+font_server.ini

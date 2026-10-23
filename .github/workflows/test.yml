@@ -44,6 +44,7 @@ jobs:
     - name: Package Release Archive
       run: |
         zip -r minischeme-proxy.zip server.py app_proxy.py proxy tools requirements.txt config.example.ini pytest.ini README.md
+        zip -r minischeme-font-server.zip font_server.py fontsrv requirements.txt README.md -x "*/__pycache__/*"
 
     - name: Publish Release Assets
       uses: softprops/action-gh-release@v2
@@ -53,6 +54,7 @@ jobs:
         make_latest: true
         files: |
           minischeme-proxy.zip
+          minischeme-font-server.zip
           requirements.txt
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

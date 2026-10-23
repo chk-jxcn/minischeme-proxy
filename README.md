@@ -53,6 +53,20 @@ python app_proxy.py --mode public --port 8087 --config config.ini
 ### The public server
 `tools/deploy_public_proxy.py` deploys `server.py` (the same code the WebREPL's local server runs) as the systemd service `minischeme-proxy` in `/opt/minischeme-proxy`: `server.py --proxy-only --protocol both` (plaintext `/app/*` for the online simulator, MSC1 for boards). An existing `/opt/minischeme-proxy/config.ini` is kept untouched; a new one gets a random admin password and `master_key_1`, and an empty `[qweather]` section.
 
+## Font server (`font_server.py`)
+A service of its own, beside the app proxy: boards ask it, **without a password**, for the glyphs of the characters their fonts lack (emoji, Korean, traditional and rare characters), or for every character of their system text when `font_server_first = 1` (firmware API 1.11, config.ini `[fonts]`). It needs no app server.
+
+```bash
+python font_server.py                       # local: http://127.0.0.1:8090, password "admin", the PC's fonts offered
+python font_server.py --mode public --port 8090 --data /opt/minischeme-font/fontdata --config font_server.ini
+```
+
+- **Fonts.** On the administration page (`http://host:8090/`, the password from `[security] admin_password` in the config or `MINISCHEME_FONT_ADMIN_PASSWORD`): upload `.ttf` / `.ttc` / `.otf` files, enable them and put them in order. In local mode the installed fonts (Windows: `C:\Windows\Fonts`) can be enabled too, e.g. Malgun Gothic for Korean and Segoe UI Emoji for emoji. Public mode needs a password and offers only uploads. Only upload fonts you may use on a server.
+- **Which font draws a character:** the face the board asks for (its system font, `simsun`, or `font_server_face`) when the server has it, uploaded or installed, then the enabled fonts in order. Glyphs are rendered like the board's font ROM (`minischeme-webrepl/tools/make_font.py`): a SimSun glyph from the server is the same as the ROM's; a glyph taller than the cell (emoji) is drawn at the largest size that fits.
+- **API:** `GET /font/glyphs?face=simsun&size=16&cps=4e2d,1f600` (hex code points, at most 64) answers an `MGLY` reply (`fontsrv/glyphs.py`): per code point its advance and 1-bit rows, or "absent"; the reply carries an identity hash that changes with the fonts, so boards drop old glyphs. `GET /font/faces`, `GET /font/preview?face=&size=&text=` (PNG), `GET /health`. Any origin may call it (the WebREPL page does).
+- **Public server:** `tools/deploy_font_server.py` installs it as the systemd service `minischeme-font` in `/opt/minischeme-font` (port 8090), keeping its fonts and config; a new config gets a random administration password (read it on the server: `/opt/minischeme-font/font_server.ini`).
+- Tests: `tests/test_font_server.py` builds its own font (fontTools), no system fonts or network.
+
 ## Running Tests
 ```bash
 python -m pytest -v tests

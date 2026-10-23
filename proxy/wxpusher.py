@@ -1,6 +1,6 @@
 """WxPusher receiver (/app/wxpusher), notifier (/app/notifier, /notify) and
 WxPusher sender (/wxpusher/send, /notify wx=1), ported from the original
-tools/app_proxy.py.
+single-file app proxy.
 
 The receiver logs in to WxPusher as a desktop client of the user (a login
 QR code scanned with WeChat) and keeps the messages pushed to them. Each

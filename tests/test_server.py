@@ -151,23 +151,26 @@ def test_per_app_endpoints(proxy_server):
     """Verifies individual app endpoints and multi-page aggregation."""
     base_url, _, _ = proxy_server
 
-    # 1. Weather: serves all 5 pages
+    # 1. Weather: all 5 pages from QWeather, or (no key here) an error item, never invented weather
     w_req = urllib.request.urlopen(f"{base_url}/app/weather?loc=Beijing")
     w_data = json.loads(w_req.read().decode())
     types = {it["t"] for it in w_data["items"]}
-    assert "loc" in types and "now" in types and "day" in types and "hour" in types and "idx" in types
+    assert types == {"error"} or {"loc", "now", "day", "hour", "idx"} <= types
+    assert "demo" not in types
 
-    # 2. News: cat=all returns all categories in one query
-    n_req = urllib.request.urlopen(f"{base_url}/app/news?cat=all&n=5")
+    # 2. News: one list per request (live lists; offline the document is an error item)
+    n_req = urllib.request.urlopen(f"{base_url}/app/news?cat=finance&n=5")
     n_data = json.loads(n_req.read().decode())
-    cats = {it.get("c") for it in n_data["items"] if "c" in it}
-    assert "realtime" in cats and "livelihood" in cats and "finance" in cats
+    rows = [it for it in n_data["items"] if it["t"] == "item"]
+    assert rows or any(it["t"] == "error" for it in n_data["items"])
+    assert len(rows) <= 5 and all(it["c"] == str(i) for i, it in enumerate(rows, 1))
 
-    # 3. Stocks: view=all returns quotes, trends, and klines together
+    # 3. Stocks: view=all returns live quotes (charts when they could be fetched), or an error item
     s_req = urllib.request.urlopen(f"{base_url}/app/stocks?view=all")
     s_data = json.loads(s_req.read().decode())
     s_types = {it["t"] for it in s_data["items"]}
-    assert ("q" in s_types or "quote" in s_types) and "trend" in s_types and ("k" in s_types or "kline" in s_types)
+    assert s_types == {"error"} or ("q" in s_types or "idx" in s_types)
+    assert "demo" not in s_types
 
     # 4. Crypto: view=all
     c_req = urllib.request.urlopen(f"{base_url}/app/crypto?view=all")
@@ -188,8 +191,8 @@ def test_weather_with_token_and_non_persistence(proxy_server):
     w_req = urllib.request.urlopen(f"{base_url}/app/weather?loc=Shenzhen&token={test_token}")
     assert w_req.status == 200
     w_data = json.loads(w_req.read().decode())
-    types = {it["t"] for it in w_data["items"]}
-    assert "loc" in types and "now" in types and "hours" in types
+    # a wrong key: QWeather refuses it, the document says so (no invented weather)
+    assert [it["t"] for it in w_data["items"]] == ["error"]
 
     # Test key alias compatibility
     w_req2 = urllib.request.urlopen(f"{base_url}/app/weather?loc=Shenzhen&key={test_token}")
@@ -214,25 +217,19 @@ def test_weather_ip_geolocation(proxy_server):
     """Verifies that weather location is automatically determined from client IP."""
     base_url, _, _ = proxy_server
 
-    # 1. Test with client_ip query parameter
-    req = urllib.request.urlopen(f"{base_url}/app/weather?loc=auto&client_ip=112.66.140.64")
-    assert req.status == 200
-    data = json.loads(req.read().decode())
-    loc_items = [it for it in data["items"] if it.get("t") == "loc"]
-    assert len(loc_items) > 0
-    assert "澄迈" in loc_items[0]["a"]
+    from proxy.endpoints import locate_place
+    # the place of a client address (the offline IP table)
+    assert "澄迈" in locate_place("auto", client_ip="112.66.140.64")["name"]
 
-    # 2. Test with X-Forwarded-For header (including port strip)
+    # the endpoint takes it from client_ip or X-Forwarded-For (port stripped) without failing
+    req = urllib.request.urlopen(f"{base_url}/app/weather?loc=auto&client_ip=112.66.140.64")
+    assert req.status == 200 and json.loads(req.read().decode())["items"]
     hdr_req = urllib.request.Request(
         f"{base_url}/app/weather?loc=auto",
         headers={"X-Forwarded-For": "112.66.140.64:12345"}
     )
     res = urllib.request.urlopen(hdr_req)
-    assert res.status == 200
-    data2 = json.loads(res.read().decode())
-    loc_items2 = [it for it in data2["items"] if it.get("t") == "loc"]
-    assert len(loc_items2) > 0
-    assert "澄迈" in loc_items2[0]["a"]
+    assert res.status == 200 and json.loads(res.read().decode())["items"]
 
 
 

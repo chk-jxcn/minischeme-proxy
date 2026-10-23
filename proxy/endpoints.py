@@ -2,12 +2,12 @@
 
 Provides dedicated individual endpoints for each application:
   /app/weather   - QWeather / Open-Meteo weather forecast (now, 7d, 24h, rain, air, idx)
-  /app/news      - Multi-category news (cat=all or cat=realtime|livelihood|finance|sports|zhihu)
+  /app/news      - Hot lists (cat=realtime|livelihood|finance|sports|zhihu|toutiao, n=count)
   /app/stocks    - Market quotes (view=all or view=home|watch|charts|trends)
   /app/crypto    - Crypto market prices (view=all or view=home|trend|kline)
   /app/futures   - Commodity and financial futures (view=all or view=home|trend)
 
-Every multi-page app supports an aggregated query (e.g. cat=all, view=all) that
+Most multi-page apps support an aggregated query (e.g. view=all) that
 returns the data for all pages in a single HTTP request upon app launch,
 preventing latency during page transitions on the hardware device.
 """
@@ -486,96 +486,6 @@ def fetch_qweather(loc: str, token: str, host: str, client_ip: str = "") -> Opti
         return None
 
 
-def build_fallback_weather(loc: str, fallback_provider: str = "MiniScheme-Proxy", client_ip: str = "") -> List[Dict[str, Any]]:
-    """Builds robust fallback weather data conforming to weather.scm schema."""
-    city_name = locate_place(loc, client_ip=client_ip)["name"] if (not loc or loc.strip().lower() == "auto") else loc.strip()
-    now_struct = time.localtime()
-    now_hhmm = time.strftime("%H:%M", now_struct)
-
-    provider_str = fallback_provider
-    if "演示数据" not in provider_str:
-        provider_str = f"{provider_str}【演示数据】"
-
-    items: List[Dict[str, Any]] = [
-        {"t": "demo", "a": "1", "b": "【演示数据】"},
-        {"t": "title", "a": "天气【演示数据】"},
-        {"t": "loc", "a": city_name, "b": provider_str, "c": now_hhmm},
-        {"t": "now", "a": "22", "b": "晴", "c": "sun", "d": "21", "e": "45"},
-        {"t": "now2", "a": "东北风", "b": "2级", "c": "1013", "d": "10", "e": ""},
-    ]
-
-    # 7-day forecast
-    day_temps = [("24", "14", "晴", "sun"), ("23", "13", "多云", "cloud"),
-                 ("19", "11", "小雨", "rain"), ("21", "12", "晴", "sun"),
-                 ("22", "13", "多云", "partly"), ("24", "15", "晴", "sun"),
-                 ("20", "13", "阴", "overcast")]
-    for i, (hi, lo, cond, icon) in enumerate(day_temps):
-        lbl = format_day_label("", i)
-        items.append({
-            "t": "day",
-            "a": lbl,
-            "b": cond,
-            "c": icon,
-            "d": f"{hi},{lo}",
-            "e": ",0,45"
-        })
-
-    # 24-hour forecast
-    items.append({
-        "t": "hours",
-        "a": "22,23,24,23,21,20,19,18,17,16,15,15,14,14,15,16,17,19,20,22,23,24,23,22",
-        "b": "0,0,0,5,10,10,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
-        "c": "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
-        "d": str(now_struct.tm_hour)
-    })
-    for h_off in (0, 3, 6, 9, 12, 15, 18, 21):
-        hr_val = (now_struct.tm_hour + h_off) % 24
-        items.append({
-            "t": "hour",
-            "a": f"{hr_val:02d}:00",
-            "b": "22",
-            "c": "100",
-            "d": "0"
-        })
-
-    # rain5h
-    items.append({
-        "t": "rain5h",
-        "a": "0,0,0,0,0",
-        "b": "0,0,0,5,10",
-        "c": "未来5小时无降水"
-    })
-
-    # minutely rain
-    items.append({
-        "t": "rain",
-        "a": "0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0",
-        "b": "未来两小时无降水",
-        "c": "5",
-        "d": now_hhmm
-    })
-
-    # air quality
-    items.append({
-        "t": "air",
-        "a": "42",
-        "b": "优",
-        "c": "15",
-        "d": "30",
-        "e": "首要污染物: 无"
-    })
-
-    # indices
-    items.extend([
-        {"t": "idx", "a": "舒适度", "b": "舒适", "c": "白天温度适宜，风力不大，感受舒适"},
-        {"t": "idx", "a": "穿衣", "b": "夹克", "c": "建议着单层棉麻面料的短套装、T恤衫"},
-        {"t": "idx", "a": "感冒", "b": "少发", "c": "各项气象条件适宜，无明显降温"},
-        {"t": "idx", "a": "紫外线", "b": "中等", "c": "涂擦SPF大于15、PA+防晒护肤品"},
-    ])
-
-    items.append({"t": "upd", "a": now_hhmm})
-    return items
-
 
 _QWEATHER_DEFAULT = {"key": "", "host": ""}
 _QWEATHER_HOST_RE = re.compile(r"^(?:[a-z0-9-]+\.re\.qweatherapi\.com|(?:dev|geo)?api\.qweather\.com|[a-z0-9-]+\.qweatherapi\.com)$")
@@ -623,112 +533,19 @@ def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "
     if hit:
         return hit
 
-    items = None
-    is_demo = False
-    if tok:
-        items = fetch_qweather(loc, tok, hst, client_ip=client_ip)
-
-    if not items:
-        is_demo = True
-        provider = "MiniScheme-Proxy" if not tok else "和风天气(回退)"
-        items = build_fallback_weather(loc, provider, client_ip=client_ip)
-
-    title = "天气【演示数据】" if is_demo else "天气"
-    data = {"title": title, "is_demo": is_demo, "items": items}
+    if not tok:
+        return {"items": [{"t": "error", "a": "天气: 服务器没有设置和风天气的 API key（应用设置里也可以填自己的）"}]}
+    items = fetch_qweather(loc, tok, hst, client_ip=client_ip)
+    if not items:   # not cached: asked again next time; the device keeps its last weather
+        return {"items": [{"t": "error", "a": "天气: 和风天气暂时无法访问"}]}
+    data = {"title": "天气", "items": items}
     cache.set(cache_key, data, ttl_seconds=600)
     return data
 
 
 # ---------------------------------------------------------------------------
-# 2. Hot News (/app/news) - Supports cat=all for all 5 pages
+# 2. Hot News (/app/news): proxy/news.py (Baidu boards, Zhihu, Toutiao)
 # ---------------------------------------------------------------------------
-
-NEWS_CATEGORIES = {
-    "realtime": [
-        ("全球开源软件供应链安全治理研讨会在京举行", "爆", 1),
-        ("微型嵌入式Scheme解释器助力物联网边缘计算", "热", 2),
-        ("新能源车载算力平台新突破，国产芯片受瞩目", "新", 3),
-        ("多地启动新一轮促消费政策，实体商业回暖", "", 4),
-        ("全球人工智能安全评估框架标准正式发布", "热", 5),
-        ("空间站新一批科学实验样品顺利返回地球", "新", 6),
-        ("绿色算力中心能效比创下历史新高", "", 7),
-        ("高精度卫星导航系统服务全球超百个国家", "", 8),
-    ],
-    "livelihood": [
-        ("全国多地秋粮丰收在望，收购工作全面展开", "新", 1),
-        ("城市便民生活圈建设持续推进，百姓生活更便利", "热", 2),
-        ("基本医保参保覆盖面进一步巩固，异地就医结算升级", "", 3),
-        ("公共交通绿色升级，纯电动公交占比突破八成", "", 4),
-        ("普惠养老托育服务体系加快构建", "", 5),
-    ],
-    "finance": [
-        ("央行宏观审慎调控政策发力，流动性保持合理充裕", "热", 1),
-        ("科技创新类企业上市融资通道持续优化", "新", 2),
-        ("主要指数集体回升，硬科技板块涨幅居前", "爆", 3),
-        ("外资金融机构持续加大在华资产配置", "", 4),
-        ("跨境贸易人民币结算规模稳步扩大", "", 5),
-    ],
-    "sports": [
-        ("国际青年田径锦标赛中国选手再破赛事纪录", "爆", 1),
-        ("全国和美乡村篮球大赛总决赛点燃激情", "热", 2),
-        ("亚洲冬季运动会筹备工作进入最后冲刺阶段", "新", 3),
-        ("马拉松黄金赛事季开启，全民健身蔚然成风", "", 4),
-        ("游泳世锦赛中国队连获两金创历史最佳战绩", "热", 5),
-    ],
-    "zhihu": [
-        ("如何评价 MiniScheme 在微控制器上的内存与GC设计？", "热", 1),
-        ("为什么函数式编程思想在低功耗物联网开发中越来越受欢迎？", "新", 2),
-        ("如何用最简单的工具链自制一个便民信息电子墨水屏？", "热", 3),
-        ("在现代软硬件架构下，如何做好跨端协议加密与数据脱敏？", "", 4),
-        ("有哪些开源软件的设计让你感受到了极致的简洁之美？", "", 5),
-    ]
-}
-
-def get_news(category: str = "realtime", n: int = 8) -> Dict[str, Any]:
-    """Fetches news headlines.
-
-    If category == "all", aggregates items for ALL pages/categories so the
-    device downloads everything on startup in a single request.
-    Cached for 5 minutes (300 seconds).
-    """
-    cache_key = f"news:{category}:{n}"
-    hit = cache.get(cache_key)
-    if hit:
-        return hit
-
-    items: List[Dict[str, str]] = []
-    now_str = time.strftime("%H:%M", time.localtime())
-
-    if category == "all":
-        # Aggregate all categories for zero-delay page switching
-        for cat_name, entries in NEWS_CATEGORIES.items():
-            for title, tag, rank in entries[:n]:
-                items.append({
-                    "t": "item",
-                    "a": title,
-                    "b": "hot",
-                    "c": cat_name,  # Category tag used by page renderer
-                    "d": tag,
-                    "e": str(rank)
-                })
-    else:
-        entries = NEWS_CATEGORIES.get(category, NEWS_CATEGORIES["realtime"])
-        for title, tag, rank in entries[:n]:
-            items.append({
-                "t": "item",
-                "a": title,
-                "b": "hot",
-                "c": category,
-                "d": tag,
-                "e": str(rank)
-            })
-
-    items.append({"t": "upd", "a": now_str})
-    items.insert(0, {"t": "demo", "a": "1", "b": "【演示数据】"})
-    items.insert(1, {"t": "title", "a": "热点新闻【演示数据】"})
-    data = {"title": "热点新闻【演示数据】", "is_demo": True, "items": items}
-    cache.set(cache_key, data, ttl_seconds=300)
-    return data
 
 
 # ---------------------------------------------------------------------------
@@ -790,15 +607,7 @@ def futures_open() -> bool:
 
 INDICES = ["sh000001", "sz399001", "sz399006", "sh000300"]
 
-STOCK_FALLBACK_DATA = {
-    "sh000001": {"name": "上证指数", "price": 3716.28, "pct": 0.24, "chg": 8.80, "high": 3750.77, "low": 3681.28, "prev": 3707.48},
-    "sz399001": {"name": "深证成指", "price": 11820.50, "pct": 0.82, "chg": 96.10, "high": 11850.00, "low": 11730.00, "prev": 11724.40},
-    "sz399006": {"name": "创业板指", "price": 2495.30, "pct": 1.15, "chg": 28.30, "high": 2510.00, "low": 2465.00, "prev": 2467.00},
-    "sh000300": {"name": "沪深300", "price": 4280.20, "pct": 0.65, "chg": 27.60, "high": 4295.00, "low": 4250.00, "prev": 4252.60},
-    "sh600519": {"name": "贵州茅台", "price": 1580.00, "pct": 0.65, "chg": 10.20, "high": 1590.00, "low": 1570.00, "prev": 1569.80},
-    "sz300750": {"name": "宁德时代", "price": 245.50, "pct": 2.35, "chg": 5.65, "high": 248.00, "low": 240.00, "prev": 239.85},
-    "sz000858": {"name": "五 粮 液", "price": 142.20, "pct": 0.45, "chg": 0.64, "high": 143.50, "low": 141.50, "prev": 141.56},
-}
+
 
 
 def stock_clean_code(c: str) -> str:
@@ -886,7 +695,7 @@ def make_stock_trend_item(code: str, info: Dict[str, Any]) -> Dict[str, str]:
     except Exception:
         pts = None
     if not pts:
-        pts = [0, 12, 18, 25, 30, 22, 15, 40, 45, 52, 50, 48, 55, 57]
+        return None
     high = info.get("high", price * 1.01)
     low = info.get("low", price * 0.99)
     return {
@@ -918,7 +727,7 @@ def make_stock_kline_item(code: str, info: Dict[str, Any]) -> Dict[str, str]:
     except Exception:
         pts = None
     if not pts:
-        pts = [-25, -18, -10, -5, 2, 8, 12, 10, 15, 18, 22, 25, 28, 30, 35, 42, 50, int(round(pct * 10))]
+        return None
     return {
         "t": "k",
         "a": name,
@@ -954,49 +763,50 @@ def get_stocks(view: str = "home", codes: str = "sh600519,sz300750,sz000858", in
     except Exception:
         live_quotes = {}
 
-    def get_info(s: str) -> Dict[str, Any]:
-        if s in live_quotes:
-            return live_quotes[s]
-        if s in STOCK_FALLBACK_DATA:
-            return STOCK_FALLBACK_DATA[s]
-        return {"name": s, "price": 100.0, "pct": 0.50, "chg": 0.50, "high": 102.0, "low": 99.0, "prev": 99.50}
+    if not live_quotes:   # never invented quotes: the device keeps its last real ones
+        return {"items": [{"t": "error", "a": "股票行情: 行情接口暂时无法访问"}]}
 
+    def get_info(s: str) -> Dict[str, Any]:
+        return live_quotes[s]
+
+    INDICES_LIVE = [c for c in INDICES if c in live_quotes]
+    watch_codes = [c for c in watch_codes if c in live_quotes]
+    if idx_code not in live_quotes:
+        idx_code = INDICES_LIVE[0] if INDICES_LIVE else idx_code
     is_open = market_open()
-    is_demo = not bool(live_quotes)
     items: List[Dict[str, str]] = [
         {"t": "meta", "a": "交易中" if is_open else "已收盘", "b": "沪深市场", "c": time.strftime("%H:%M", time.localtime())}
     ]
 
-    idx_items = [make_stock_item("idx", c, get_info(c)) for c in INDICES]
+    idx_items = [make_stock_item("idx", c, get_info(c)) for c in INDICES_LIVE]
     q_items = [make_stock_item("q", c, get_info(c)) for c in watch_codes]
+    trend = lambda c: make_stock_trend_item(c, get_info(c)) if c in live_quotes else None
+    kline = lambda c: make_stock_kline_item(c, get_info(c))
 
     if view == "home":
         items += idx_items
-        items.append(make_stock_trend_item(idx_code, get_info(idx_code)))
+        items.append(trend(idx_code))
         items += q_items[:3]
     elif view == "list":
         items += q_items
     elif view == "trend":
-        for c in INDICES[:3]:
-            items.append(make_stock_trend_item(c, get_info(c)))
+        for c in INDICES_LIVE[:3]:
+            items.append(trend(c))
         items += idx_items[:3]
     elif view == "kline":
         for c in watch_codes[:6]:
-            items.append(make_stock_kline_item(c, get_info(c)))
+            items.append(kline(c))
     else:  # view == "all" or aggregated
         items += idx_items
         items += q_items
-        for c in INDICES[:3]:
-            items.append(make_stock_trend_item(c, get_info(c)))
+        for c in INDICES_LIVE[:3]:
+            items.append(trend(c))
         for c in watch_codes[:6]:
-            items.append(make_stock_kline_item(c, get_info(c)))
+            items.append(kline(c))
 
+    items = [it for it in items if it]   # a chart that could not be fetched is left out
     items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
-    if is_demo:
-        items.insert(0, {"t": "demo", "a": "1", "b": "【演示数据】"})
-        items.insert(1, {"t": "title", "a": "股票行情【演示数据】"})
-    title = "股票行情【演示数据】" if is_demo else "股票行情"
-    data = {"title": title, "is_demo": is_demo, "items": items}
+    data = {"title": "股票行情", "items": items}
     cache.set(cache_key, data, ttl_seconds=15 if is_open else 120)
     return data
 
@@ -1275,15 +1085,7 @@ SINA_HEADERS = {
 SINA_FUTURES_API = "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20t=/InnerFuturesNewService."
 CFFEX_PRODUCTS = ("IF", "IH", "IC", "IM", "T", "TF", "TS", "TL")
 
-FUTURES_FALLBACK_DATA = {
-    "RB0": {"name": "螺纹主力", "price": 3086.0, "pct": 0.45, "high": 3088.0, "low": 3069.0, "prev": 3072.0, "chg": 14.0},
-    "AU0": {"name": "沪金主力", "price": 595.60, "pct": 0.42, "high": 598.0, "low": 592.5, "prev": 593.10, "chg": 2.50},
-    "AG0": {"name": "沪银主力", "price": 7450.0, "pct": 0.54, "high": 7520.0, "low": 7380.0, "prev": 7410.0, "chg": 40.0},
-    "SC0": {"name": "原油主力", "price": 535.2, "pct": -1.04, "high": 542.0, "low": 532.5, "prev": 540.8, "chg": -5.6},
-    "CU0": {"name": "沪铜主力", "price": 78200.0, "pct": 1.12, "high": 78500.0, "low": 77200.0, "prev": 77330.0, "chg": 870.0},
-    "M0":  {"name": "豆粕主力", "price": 3025.0, "pct": 0.50, "high": 3045.0, "low": 2998.0, "prev": 3010.0, "chg": 15.0},
-    "IF0": {"name": "沪深300", "price": 3885.0, "pct": 0.60, "high": 3910.0, "low": 3855.0, "prev": 3862.0, "chg": 23.0},
-}
+
 
 
 def futures_clean_code(c: str) -> str:
@@ -1375,7 +1177,7 @@ def make_futures_trend_item(code: str, info: Dict[str, Any]) -> Dict[str, str]:
     except Exception:
         pts = None
     if not pts:
-        pts = [0, 5, 12, 18, 22, 20, 28, 32, 35, 40, 42]
+        return None
     high = info.get("high", max(prev, last))
     low = info.get("low", min(prev, last))
     return {
@@ -1410,7 +1212,7 @@ def make_futures_kline_item(code: str, info: Dict[str, Any]) -> Dict[str, str]:
     except Exception:
         pts = None
     if not pts:
-        pts = [-25, -20, -15, -10, -5, 2, 8, 12, 10, 15, 18, 22, 25, 28, 30, 35, 42, 50, int(round(pct * 10))]
+        return None
     return {
         "t": "k",
         "a": name,
@@ -1444,12 +1246,15 @@ def get_futures(view: str = "home", codes: str = "RB0,AU0,CU0", chart: str = "")
     except Exception:
         live_quotes = {}
 
+    if not live_quotes:   # never invented quotes: the device keeps its last real ones
+        return {"items": [{"t": "error", "a": "期货行情: 行情接口暂时无法访问"}]}
+
     def get_info(c: str) -> Dict[str, Any]:
-        if c in live_quotes:
-            return live_quotes[c]
-        if c in FUTURES_FALLBACK_DATA:
-            return FUTURES_FALLBACK_DATA[c]
-        return {"name": c, "price": 3000.0, "pct": 0.50, "chg": 15.0, "high": 3050.0, "low": 2980.0, "prev": 2985.0}
+        return live_quotes[c]
+
+    code_list = [c for c in code_list if c in live_quotes]
+    if chart_code not in live_quotes:
+        chart_code = code_list[0] if code_list else chart_code
 
     is_open = futures_open()
     items: List[Dict[str, str]] = [
@@ -1457,28 +1262,27 @@ def get_futures(view: str = "home", codes: str = "RB0,AU0,CU0", chart: str = "")
     ]
 
     q_items = [make_futures_quote_item(c, get_info(c)) for c in code_list]
+    chart_live = chart_code in live_quotes
 
     if view == "list":
         items += q_items
     elif view == "trend":
-        items.append(make_futures_quote_item(chart_code, get_info(chart_code)))
-        items.append(make_futures_trend_item(chart_code, get_info(chart_code)))
+        if chart_live:
+            items.append(make_futures_quote_item(chart_code, get_info(chart_code)))
+            items.append(make_futures_trend_item(chart_code, get_info(chart_code)))
     elif view == "kline":
         for c in code_list[:6]:
             items.append(make_futures_kline_item(c, get_info(c)))
     else:  # view == "all" or aggregated
         items += q_items
-        items.append(make_futures_trend_item(chart_code, get_info(chart_code)))
+        if chart_live:
+            items.append(make_futures_trend_item(chart_code, get_info(chart_code)))
         for c in code_list[:6]:
             items.append(make_futures_kline_item(c, get_info(c)))
 
+    items = [it for it in items if it]   # a chart that could not be fetched is left out
     items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
-    is_demo = not bool(live_quotes)
-    if is_demo:
-        items.insert(0, {"t": "demo", "a": "1", "b": "【演示数据】"})
-        items.insert(1, {"t": "title", "a": "期货行情【演示数据】"})
-    title = "期货行情【演示数据】" if is_demo else "期货行情"
-    data = {"title": title, "is_demo": is_demo, "items": items}
+    data = {"title": "期货行情", "items": items}
     cache.set(cache_key, data, ttl_seconds=15 if is_open else 120)
     return data
 
@@ -1762,7 +1566,12 @@ def handle_app_query(path_with_query: str, client_ip: str = "", device: str = ""
             client_ip=effective_ip
         )
     elif path == "/app/news":
-        data = get_news(qs.get("cat", ["all"])[0], int(qs.get("n", ["8"])[0]))
+        from .news import get_news
+        try:
+            n = int(qs.get("n", ["10"])[0])
+        except ValueError:
+            n = 10
+        data = get_news(qs.get("cat", ["realtime"])[0], n)
     elif path == "/app/stocks":
         data = get_stocks(
             qs.get("view", ["all"])[0],

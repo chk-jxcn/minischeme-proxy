@@ -1,7 +1,7 @@
 """The calendar app's data (/app/calendar view=today, view=month): the date,
 the lunar date, solar terms, festivals, 宜忌 (lunar_python), the countdowns
 and world clocks the device asks for. Ported from the original
-tools/app_proxy.py; every value is computed for the actual day (no fixed
+single-file app proxy; every value is computed for the actual day (no fixed
 sample data).
 
 lunar_python (MIT, pure Python) is vendored in proxy/vendor/ so a server

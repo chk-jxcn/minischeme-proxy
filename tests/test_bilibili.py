@@ -7,8 +7,8 @@ import pytest
 from proxy import bilibili
 
 
-def _video(aid, title, views=123456, pic="http://i0.hdslb.com/bfs/archive/x.jpg"):
-    return {"aid": aid, "title": title, "pic": pic, "stat": {"view": views}}
+def _video(aid, title, views=123456, pic="http://i0.hdslb.com/bfs/archive/x.jpg", owner="UP一号"):
+    return {"aid": aid, "title": title, "pic": pic, "stat": {"view": views}, "owner": {"name": owner}}
 
 
 def _up_video(aid, title, days_ago=0, play=1000, pic="http://i0.hdslb.com/bfs/archive/x.jpg"):
@@ -47,7 +47,7 @@ def test_popular_items(monkeypatch):
     monkeypatch.setattr(bilibili, "_fetch_popular", lambda n: rows)
     doc = bilibili.get_bilibili("popular", "0", 10)
     items = doc["items"]
-    assert items[0] == {"t": "v", "a": "标题一", "b": "1", "c": "123"}
+    assert items[0] == {"t": "v", "a": "标题一", "b": "1", "c": "123", "d": "UP一号"}
     assert [i["t"] for i in items] == ["v", "v", "upd"]
     assert items[1]["c"] == "2.0万"
 
@@ -253,6 +253,7 @@ def test_up_category_builds_a_meta_item_with_the_display_name(monkeypatch):
     doc = bilibili.get_bilibili("up", "0", 10, "546195")
     assert doc["items"][0] == {"t": "meta", "a": "老番茄"}
     assert doc["items"][1]["a"] == "【新】新视频"
+    assert doc["items"][1]["d"] == "老番茄"   # the UP主 line of every row
 
 
 def test_up_category_with_no_videos_is_an_error_not_an_empty_screen(monkeypatch):

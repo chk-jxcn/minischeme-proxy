@@ -28,7 +28,7 @@ better with no login. Either way, same policy as any other
 upstream failure here: keep the app's last data, tell the user why, never
 invent a list.
 
-Document: {"items": [{"t":"meta","a":subject}?, {"t":"v","a":title,"b":aid,"c":views}...,
+Document: {"items": [{"t":"meta","a":subject}?, {"t":"v","a":title,"b":aid,"c":views,"d":UP主}...,
                      {"t":"upd","a":"HH:MM"}]}
 Pictures: /app/bilibili/pic?id=<aid>&w=<px>&h=<px> answers a small baseline JPEG cover,
 cropped and resized to exactly the box the device asked for (board_jpeg-style, 11.7).
@@ -326,7 +326,7 @@ def _fetch_up_videos(mid: str, n: int) -> List[Dict[str, Any]]:
     return _fetch_up_videos_app(mid, n) if up_uses_app_api() else _fetch_up_videos_web(mid, n)
 
 
-def _make_up_items(vlist: List[Dict[str, Any]], n: int) -> List[Dict[str, str]]:
+def _make_up_items(vlist: List[Dict[str, Any]], n: int, up: str = "") -> List[Dict[str, str]]:
     today = datetime.now(BJT).date()
     items = []
     for v in vlist[:n]:
@@ -347,7 +347,7 @@ def _make_up_items(vlist: List[Dict[str, Any]], n: int) -> List[Dict[str, str]]:
         views = _fmt_count(v.get("play") or 0)
         if pic:
             _remember_pic_url(aid, pic)
-        items.append({"t": "v", "a": title, "b": aid, "c": views})
+        items.append({"t": "v", "a": title, "b": aid, "c": views, "d": board_text(up)[:24]})
     return items
 
 
@@ -382,10 +382,11 @@ def _make_items(raw: List[Dict[str, Any]], n: int) -> List[Dict[str, str]]:
         pic = _full_pic_url(str(v.get("pic") or ""))
         stat = v.get("stat") or {}
         views = _fmt_count(stat.get("view") if stat.get("view") is not None else v.get("view") or 0)
+        up = board_text(str((v.get("owner") or {}).get("name") or v.get("author") or ""))[:24]
         if aid and pic:
             _remember_pic_url(aid, pic)
         if aid:
-            items.append({"t": "v", "a": title, "b": aid, "c": views})
+            items.append({"t": "v", "a": title, "b": aid, "c": views, "d": up})
     return items
 
 
@@ -404,7 +405,7 @@ def _build_document(category: str, rid: str, up: str, n: int) -> Tuple[List[Dict
         return _make_items(_fetch_rank(rid, n), n), ""
     if category == "up":
         mid, name = _resolve_up(up)
-        items = _make_up_items(_fetch_up_videos(mid, n), n)
+        items = _make_up_items(_fetch_up_videos(mid, n), n, name)
         if not items:
             raise BilibiliError(f"{name} 最近没有投稿")
         return items, name

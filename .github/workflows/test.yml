@@ -67,6 +67,8 @@ jobs:
           # Pillow (FreeType) inside the exe: the preview is drawn
           $p = Invoke-WebRequest "http://127.0.0.1:18190/font/preview?text=A" -UseBasicParsing
           if ($p.Headers['Content-Type'] -notlike 'image/png*') { throw "MiniScheme-FontServer.exe: no PNG preview" }
+          # no console: its output goes to font_server.log next to the exe
+          if (-not (Test-Path "dist/font_server.log")) { throw "MiniScheme-FontServer.exe: no font_server.log" }
           Write-Host "MiniScheme-FontServer.exe serves /health, /font/faces and /font/preview"
         } finally {
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue

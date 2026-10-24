@@ -45,16 +45,13 @@ HOME = os.path.dirname(os.path.abspath(sys.executable if FROZEN else __file__))
 
 
 def _log_to_file():
-    """The exe has no console: print and tracebacks go to font_server.log next to it."""
-    if sys.stdout is None or sys.stderr is None:
-        try:
-            log = open(os.path.join(HOME, "font_server.log"), "a", encoding="utf-8", buffering=1)
-        except OSError:
-            log = open(os.devnull, "w", encoding="utf-8")
-        if sys.stdout is None:
-            sys.stdout = log
-        if sys.stderr is None:
-            sys.stderr = log
+    """The exe has no console (PyInstaller gives it no streams, or ones that
+    write nowhere): print and tracebacks go to font_server.log next to it."""
+    try:
+        log = open(os.path.join(HOME, "font_server.log"), "a", encoding="utf-8", buffering=1)
+    except OSError:
+        return
+    sys.stdout = sys.stderr = log
 
 
 def primary_ip():

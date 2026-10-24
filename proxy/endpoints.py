@@ -1616,6 +1616,21 @@ def handle_app_query(path_with_query: str, client_ip: str = "", device: str = ""
         data = {"items": medicine_items(qs, device, plain_device, public, db)}
     elif path == "/app/usage":
         data = get_usage()
+    elif path == "/app/bilibili":
+        from .bilibili import get_bilibili
+        data = get_bilibili(
+            qs.get("cat", ["popular"])[0],
+            qs.get("rid", ["0"])[0],
+            int(qs.get("n", ["30"])[0] or 30),
+            qs.get("up", [""])[0],
+        )
+    elif path == "/app/bilibili/pic":
+        from .bilibili import picture
+        return picture(
+            qs.get("id", [""])[0],
+            int(qs.get("w", ["120"])[0] or 120),
+            int(qs.get("h", ["68"])[0] or 68),
+        )
     elif path == "/app/ping" or path == "/health":
         data = {"status": "ok", "items": [{"t": "ok", "time": int(time.time())}]}
     else:

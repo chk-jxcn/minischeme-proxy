@@ -34,12 +34,63 @@ jobs:
       run: |
         python -m pytest -v tests
 
-  release:
+  font-exe:
     needs: test
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install PyInstaller and dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller pillow fonttools
+
+    - name: Build MiniScheme-FontServer.exe
+      run: python tools/build_font_exe.py
+
+    - name: Verify the exe starts and renders
+      shell: pwsh
+      run: |
+        $data = Join-Path $env:RUNNER_TEMP "fontdata"
+        $proc = Start-Process -FilePath "dist/MiniScheme-FontServer.exe" -ArgumentList "--no-tray", "--port", "18190", "--data", $data -PassThru
+        Start-Sleep -Seconds 10
+        try {
+          $h = Invoke-RestMethod "http://127.0.0.1:18190/health"
+          if (-not $h.ok) { throw "MiniScheme-FontServer.exe: /health failed" }
+          $faces = Invoke-RestMethod "http://127.0.0.1:18190/font/faces"
+          if (-not $faces.success) { throw "MiniScheme-FontServer.exe: /font/faces failed" }
+          # Pillow (FreeType) inside the exe: the preview is drawn
+          $p = Invoke-WebRequest "http://127.0.0.1:18190/font/preview?text=A" -UseBasicParsing
+          if ($p.Headers['Content-Type'] -notlike 'image/png*') { throw "MiniScheme-FontServer.exe: no PNG preview" }
+          Write-Host "MiniScheme-FontServer.exe serves /health, /font/faces and /font/preview"
+        } finally {
+          Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+        }
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: MiniScheme-FontServer-Windows-Exe
+        path: dist/MiniScheme-FontServer.exe
+        retention-days: 1   # storage quota: the Release keeps the file
+
+  release:
+    needs: [test, font-exe]
     if: startsWith(github.ref, 'refs/tags/v')   # releases only from a pushed version tag
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+
+    - name: Download the font server exe
+      uses: actions/download-artifact@v4
+      with:
+        name: MiniScheme-FontServer-Windows-Exe
+        path: dist
 
     - name: Package Release Archive
       run: |
@@ -55,6 +106,7 @@ jobs:
         files: |
           minischeme-proxy.zip
           minischeme-font-server.zip
+          dist/MiniScheme-FontServer.exe
           requirements.txt
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

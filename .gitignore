@@ -32,3 +32,10 @@ apps/
 # Font server data (uploaded fonts, order) and its local config
 fontdata/
 font_server.ini
+
+# PyInstaller (tools/build_font_exe.py) and the font server's local data
+build/
+dist/
+*.spec
+fontdata/
+font_server.ini

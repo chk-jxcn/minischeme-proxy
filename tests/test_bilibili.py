@@ -47,7 +47,7 @@ def test_popular_items(monkeypatch):
     monkeypatch.setattr(bilibili, "_fetch_popular", lambda n: rows)
     doc = bilibili.get_bilibili("popular", "0", 10)
     items = doc["items"]
-    assert items[0] == {"t": "v", "a": "标题一", "b": "1", "c": "123", "d": "UP一号"}
+    assert items[0] == {"t": "v", "a": "标题一", "b": "1", "c": "123", "d": "UP一号", "e": ""}
     assert [i["t"] for i in items] == ["v", "v", "upd"]
     assert items[1]["c"] == "2.0万"
 
@@ -324,3 +324,15 @@ def test_fetch_up_videos_app_normalizes_to_the_same_shape_as_web(monkeypatch):
     monkeypatch.setattr(bilibili, "_get_app_json", fake_app_json)
     rows = bilibili._fetch_up_videos_app("546195", 5)
     assert rows == [{"aid": "123", "title": "t", "pic": "//i0.hdslb.com/x.jpg", "play": 99, "created": 1000}]
+
+
+def test_items_carry_the_upload_day_in_beijing_time():
+    # 2026-10-24 23:30 Beijing time is still the 24th there (15:30 UTC)
+    ts = int(datetime(2026, 10, 24, 15, 30, tzinfo=bilibili.timezone.utc).timestamp())
+    day = str((datetime(2026, 10, 24) - datetime(1970, 1, 1)).days)
+    v = dict(_video(1, "A"), pubdate=ts)
+    assert bilibili._make_items([v], 1)[0]["e"] == day
+    assert bilibili._make_items([_video(2, "B")], 1)[0]["e"] == ""      # unknown: no age shown
+    up = bilibili._make_up_items([_up_video(3, "C", days_ago=3)], 1)[0]["e"]
+    today = (datetime.now(bilibili.BJT).date() - datetime(1970, 1, 1).date()).days
+    assert int(up) == today - 3

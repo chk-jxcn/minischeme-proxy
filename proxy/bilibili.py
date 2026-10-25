@@ -28,8 +28,10 @@ better with no login. Either way, same policy as any other
 upstream failure here: keep the app's last data, tell the user why, never
 invent a list.
 
-Document: {"items": [{"t":"meta","a":subject}?, {"t":"v","a":title,"b":aid,"c":views,"d":UP主}...,
+Document: {"items": [{"t":"meta","a":subject}?, {"t":"v","a":title,"b":aid,"c":views,"d":UP主,"e":day}...,
                      {"t":"upd","a":"HH:MM"}]}
+(day: the upload's Beijing date as days since 1970-01-01, "" when unknown; the
+board turns it into "3天前" against its own date, so a kept document stays right)
 Pictures: /app/bilibili/pic?id=<aid>&w=<px>&h=<px> answers a small baseline JPEG cover,
 cropped and resized to exactly the box the device asked for (board_jpeg-style, 11.7).
 """
@@ -44,7 +46,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .cache import TTLCache
@@ -109,6 +111,16 @@ def _fmt_count(n: float) -> str:
     if n >= 1e4:
         return f"{n / 1e4:.1f}万"
     return str(int(n))
+
+
+def _pub_day(ts: Any) -> str:
+    """An upload time (unix seconds) -> its Beijing date as days since 1970-01-01, or ""."""
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool) or ts <= 0:
+        return ""
+    try:
+        return str((datetime.fromtimestamp(ts, BJT).date() - date(1970, 1, 1)).days)
+    except (OverflowError, OSError, ValueError):
+        return ""
 
 
 def _full_pic_url(pic: str) -> str:
@@ -347,7 +359,7 @@ def _make_up_items(vlist: List[Dict[str, Any]], n: int, up: str = "") -> List[Di
         views = _fmt_count(v.get("play") or 0)
         if pic:
             _remember_pic_url(aid, pic)
-        items.append({"t": "v", "a": title, "b": aid, "c": views, "d": board_text(up)[:24]})
+        items.append({"t": "v", "a": title, "b": aid, "c": views, "d": board_text(up)[:24], "e": _pub_day(created)})
     return items
 
 
@@ -386,7 +398,7 @@ def _make_items(raw: List[Dict[str, Any]], n: int) -> List[Dict[str, str]]:
         if aid and pic:
             _remember_pic_url(aid, pic)
         if aid:
-            items.append({"t": "v", "a": title, "b": aid, "c": views, "d": up})
+            items.append({"t": "v", "a": title, "b": aid, "c": views, "d": up, "e": _pub_day(v.get("pubdate"))})
     return items
 
 

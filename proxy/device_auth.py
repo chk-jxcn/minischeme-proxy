@@ -88,6 +88,27 @@ def authenticate(db, master_key_1: bytes, headers, ip: str = "") -> Tuple[str, s
     return plain, plain, ""
 
 
+def verify_password(db, mac: str, password: str, ip: str = "") -> Tuple[bool, str]:
+    """A request in a device's name that is not the device (/notify mac= password=):
+    the app service password the device is registered with here. Registers nothing.
+    (ok, reason)."""
+    import hmac
+    if db is None:
+        return False, "the server has no device database"
+    if _blocked(ip):
+        return False, "too many wrong passwords: try again later"
+    mac = normalize_device_id(mac)
+    dev = db.get_device(mac) if mac else None
+    if not dev or dev.get("status") == "simulator":
+        _failed(ip)
+        return False, "unknown device: it registers itself with its first request that carries the password"
+    stored = bytes(dev.get("hardware_hash_key") or b"")
+    if not password or not hmac.compare_digest(stored, derive_hardware_hash_key(password, mac)):
+        _failed(ip)
+        return False, "wrong app service password for this device"
+    return True, ""
+
+
 def check(db, headers, ip: str = "") -> Tuple[str, str]:
     """The device page's test button (GET /device/check): registers nothing.
     (status, detail): ok (registered here with this password), new (unknown:

@@ -47,7 +47,7 @@ def test_notifier_local_and_public():
     assert st == 200 and json.loads(body)["success"]
     items = json.loads(handle_app_query("/app/notifier?n=3")[2])["items"]
     assert items[0]["t"] == "meta" and items[1]["c"] == "hello" and items[1]["d"] == "warn"
-    # a public server: to= and the portal session of that device
+    # a public server: mac= (or to=) and the device's password or its portal session
     assert wx.handle_request("/notify?text=x", public=True)[0] == 400
     assert wx.handle_request("/notify?text=x&to=AABBCCDDEEFF", public=True)[0] == 401
     ok = wx.handle_request("/notify?to=aa:bb:cc:dd:ee:ff", b'{"text": "mine"}', public=True,
@@ -61,3 +61,29 @@ def test_notifier_local_and_public():
     assert json.loads(handle_app_query("/app/wxpusher", public=True)[2])["items"][0]["t"] == "error"
     assert wx.handle_request("/wxpusher/send", b'{"content": "x"}', public=True)[0] == 401
     assert wx.handle_request("/wxpusher/logout", public=True)[0] == 404
+
+
+def test_notifier_kept_in_the_database(tmp_path):
+    # every message in the database; the feed gives the newest n; a push in the
+    # device's name with its app service password; the portal deletes one or all
+    from proxy.database import Database
+    from proxy.crypto import derive_hardware_hash_key
+    db = Database(str(tmp_path / "p.db"))
+    mac = "AABBCCDDEEF1"
+    db.register_device(mac, derive_hardware_hash_key("pw-123456", mac), b"k" * 32)
+    for i in range(60):
+        st, _, body = wx.handle_request(f"/notify?mac={mac}&password=pw-123456&title=t{i}&text=x{i}", public=True, db=db)
+        assert st == 200, body
+    assert wx.handle_request(f"/notify?mac={mac}&password=wrong&text=x", public=True, db=db)[0] == 403
+    assert wx.handle_request("/notify?mac=112233445566&password=pw-123456&text=x", public=True, db=db)[0] == 403
+    rows, total = db.note_list(mac)
+    assert total == 60 and rows[0]["title"] == "t59"
+    items = wx.app_items("/app/notifier", {"n": "20"}, mac, True, db)
+    msgs = [x for x in items if x["t"] == "msg"]
+    assert len(msgs) == 20 and msgs[0]["b"] == "t59" and items[0]["a"] == str(db.note_last_id())
+    db.clear_app_data(mac, "notifier", str(rows[0]["id"]))       # one
+    assert db.note_list(mac)[1] == 59 and db.note_last_id() == rows[0]["id"]   # the id never goes back
+    db.clear_app_data(mac, "notifier")                           # all
+    assert db.note_list(mac)[1] == 0
+    page = wx.notes_page(db, mac, {"lim": ["5"]})
+    assert page["success"] and page["total"] == 0

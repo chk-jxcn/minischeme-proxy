@@ -545,7 +545,8 @@ def handle_wx_request(handler, body=b""):
     from proxy.user_portal import check_user_session
     token = handler._session_token(urllib.parse.parse_qs(urllib.parse.urlparse(handler.path).query))
     return handle_request(handler.path, body, server_config.is_public(),
-                          lambda mac: verify_admin_session(token) or (bool(mac) and check_user_session(token, mac)))
+                          lambda mac: verify_admin_session(token) or (bool(mac) and check_user_session(token, mac)),
+                          _proxy_db(), handler.client_address[0])
 
 
 # ---------------------------------------------------------------------------
@@ -923,6 +924,13 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                 if not check_user_session(token, mac):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 return self._json_reply({"success": True, "items": proxy_ctx.db.get_device_logs(mac)})
+            if req_path == "/api/user/notes":   # the notifier's messages, newest first
+                mac = qs.get("mac", [""])[0]
+                token = self._session_token(qs)
+                if not check_user_session(token, mac):
+                    return self._json_reply({"success": False, "error": "unauthorized"}, 401)
+                from proxy.wxpusher import notes_page
+                return self._json_reply(notes_page(proxy_ctx.db, mac, qs))
             if req_path == "/api/user/med_records":   # the medicine app's records, newest first
                 mac = qs.get("mac", [""])[0]
                 token = self._session_token(qs)
@@ -1145,8 +1153,8 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
                     return self._json_reply({"success": False, "error": "unauthorized"}, 401)
                 if not app_id or app_id == "all":
                     proxy_ctx.db.clear_all_app_data(mac)
-                else:
-                    proxy_ctx.db.clear_app_data(mac, app_id)
+                else:   # id: one record (a notifier message)
+                    proxy_ctx.db.clear_app_data(mac, app_id, payload.get("id") or qs.get("id", [None])[0])
                 return self._json_reply({"success": True})
 
             if req_path == "/api/user/account/delete":

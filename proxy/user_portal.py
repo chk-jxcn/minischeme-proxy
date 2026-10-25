@@ -92,6 +92,17 @@ th { background: #f1f5f9; color: #475569; }
     </table>
     <div style="margin-top:10px;"><button id="med-more" class="secondary hidden" onclick="loadMedRecords(true)">加载更多</button></div>
 
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-top:30px; flex-wrap:wrap; gap:10px;">
+      <h3 style="margin:0;">消息提示 <span id="note-total" class="badge"></span></h3>
+      <button class="danger" style="padding:6px 14px; font-size:13px;" onclick="clearNotes()">清空服务器上的消息</button>
+    </div>
+    <p style="margin:6px 0 0; color:#64748b; font-size:13px;">推送给这台设备的消息（/notify），服务器全部保留，从新到旧；设备上的“消息提示”应用只保留它设定的最新几条。推送：<code>/notify?mac=设备ID&amp;password=应用服务密码&amp;title=标题&amp;text=内容&amp;level=info|warn|urgent</code></p>
+    <table id="note-table">
+      <thead><tr><th>时间</th><th>级别</th><th>标题</th><th>内容</th><th>来源</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div style="margin-top:10px;"><button id="note-more" class="secondary hidden" onclick="loadNotes(true)">加载更多</button></div>
+
     <h3 style="margin-top:30px;">近期 API 访问审计日志</h3>
     <table id="log-table">
       <thead><tr><th>时间</th><th>来源 IP</th><th>方法</th><th>接口</th><th>状态</th><th>数据量</th></tr></thead>
@@ -258,6 +269,7 @@ async function loadDashboard() {
     }
 
     await loadMedRecords(false);
+    await loadNotes(false);
 
     // Load logs
     const rLogs = await fetch(`/api/user/logs?mac=${encodeURIComponent(curMac)}`, { headers: authHeaders() });
@@ -308,6 +320,42 @@ async function loadMedRecords(more) {
   document.getElementById('med-total').innerText = d.total ? `共 ${d.total} 条` : '';
   document.getElementById('med-more').classList.toggle('hidden', medOffset >= (d.total || 0));
 }
+let noteOffset = 0;
+const NOTE_LEVEL = {info: '通知', warn: '提醒', urgent: '紧急'};
+function noteTime(sec) {
+  const d = new Date(sec * 1000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ` +
+         `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+async function loadNotes(more) {
+  if (!more) noteOffset = 0;
+  const r = await fetch(`/api/user/notes?mac=${encodeURIComponent(curMac)}&off=${noteOffset}&lim=50`, { headers: authHeaders() });
+  const d = await r.json();
+  if (!d.success) return;
+  const tbody = document.querySelector('#note-table tbody');
+  if (!more) tbody.innerHTML = '';
+  (d.items || []).forEach(x => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${noteTime(x.created)}</td><td style="color:${x.level === 'urgent' ? '#dc2626' : x.level === 'warn' ? '#d97706' : '#2563eb'}">${esc(NOTE_LEVEL[x.level] || x.level)}</td>` +
+                   `<td>${esc(x.title)}</td><td>${esc(x.text)}</td><td>${esc(x.source)}</td>` +
+                   `<td><button class="secondary" style="padding:3px 10px;font-size:12px;" onclick="deleteNote(${Number(x.id)})">删除</button></td>`;
+    tbody.appendChild(tr);
+  });
+  noteOffset += (d.items || []).length;
+  if (!noteOffset) tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:#94a3b8;">没有消息</td></tr>';
+  document.getElementById('note-total').innerText = d.total ? `共 ${d.total} 条` : '';
+  document.getElementById('note-more').classList.toggle('hidden', noteOffset >= (d.total || 0));
+}
+async function deleteNote(id) {
+  await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=notifier&id=${id}`, { method: 'POST', headers: authHeaders() });
+  loadNotes(false);
+}
+async function clearNotes() {
+  if (!confirm('确认删除服务器上这台设备的全部消息？设备上已经收到的消息不受影响。')) return;
+  await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=notifier`, { method: 'POST', headers: authHeaders() });
+  loadNotes(false);
+}
+
 async function clearMedRecords() {
   if (!confirm('确认清空服务器上这台设备的全部服药记录？设备上的记录不受影响，但已经上传过的不会再上传。')) return;
   await fetch(`/api/user/data/clear?mac=${encodeURIComponent(curMac)}&app_id=medicine`, { method: 'POST', headers: authHeaders() });

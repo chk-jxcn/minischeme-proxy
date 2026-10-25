@@ -567,32 +567,42 @@ def app_wxpusher(qs: Dict[str, str], device: str) -> List[Dict[str, str]]:
 # ---------------------------------------------------------------------------
 # Notifier: messages for a board, pushed here by scripts and phones
 #   GET/POST /notify?text=...&title=...&level=info|warn|urgent&from=...&wx=1
-# The board's notifier app polls /app/notifier. A local server keeps one
-# list for the boards of its network; a public one a list per device (to=).
+#   a public server: also mac=<device id>&password=<its app service password>
+# The board's notifier app polls /app/notifier?n=<its newest n>. The server
+# keeps every message in its database (notes) until the owner deletes them
+# on the user portal; a local server keeps one list for the boards of its
+# network, a public one a list per device. Without a database: the newest
+# NOTIFY_KEEP in memory.
 # ---------------------------------------------------------------------------
 
 NOTIFY_KEEP = 30
+NOTIFY_FEED_MAX = 50
 _notes: Dict[str, list] = {}
 _note_seq = 0
 _note_lock = threading.Lock()
 
 
-def notify_push(fields: Dict[str, str], device: str = '') -> Dict[str, Any]:
+def notify_push(fields: Dict[str, str], device: str = '', db=None) -> Dict[str, Any]:
+    """A message for device ('local': a local server's boards), kept in db (else in memory)."""
     global _note_seq
-    text = clip(fields.get('text') or fields.get('content') or '', 70)
-    title = clip(fields.get('title') or '', 16)
+    text = clip(fields.get('text') or fields.get('content') or '', 400)
+    title = clip(fields.get('title') or '', 60)
     if not text and not title:
         raise ProxyError('empty message: text= or title=')
     level = fields.get('level', 'info')
     level = level if level in ('info', 'warn', 'urgent') else 'info'
-    with _note_lock:
-        _note_seq += 1
-        note = {'id': _note_seq, 'time': hhmm(), 'title': title, 'text': text, 'level': level,
-                'source': clip(fields.get('from') or fields.get('source') or '', 10)}
-        notes = _notes.setdefault(_key(device), [])
-        notes.append(note)
-        del notes[:-NOTIFY_KEEP]
-    result = {'success': True, 'id': note['id']}
+    source = clip(fields.get('from') or fields.get('source') or '', 30)
+    if db is not None:
+        note_id = db.note_add(_key(device), hhmm(), title, text, level, source)
+    else:
+        with _note_lock:
+            _note_seq += 1
+            note_id = _note_seq
+            notes = _notes.setdefault(_key(device), [])
+            notes.append({'id': note_id, 'time': hhmm(), 'title': title, 'text': text, 'level': level,
+                          'source': source})
+            del notes[:-NOTIFY_KEEP]
+    result = {'success': True, 'id': note_id}
     if str(fields.get('wx', '')).lower() in ('1', 'true', 'yes'):
         try:
             result['wx'] = wxpusher_send((title + '\n' if title else '') + text, title or text)
@@ -601,14 +611,21 @@ def notify_push(fields: Dict[str, str], device: str = '') -> Dict[str, Any]:
     return result
 
 
-def app_notifier(qs: Dict[str, str], device: str) -> List[Dict[str, str]]:
+def app_notifier(qs: Dict[str, str], device: str, db=None) -> List[Dict[str, str]]:
+    """The board's newest n messages (n= as many as it keeps, at most NOTIFY_FEED_MAX);
+    meta a: the newest id ever given (a board taking ids past its last one sees a
+    server that started again from 1)."""
     try:
-        n = max(1, min(int(qs.get('n', '8')), 12))
+        n = max(1, min(int(qs.get('n', '8')), NOTIFY_FEED_MAX))
     except ValueError:
         n = 8
-    with _note_lock:
-        notes = list(reversed(_notes.get(_key(device), [])[-n:]))
-        seq = _note_seq
+    if db is not None:
+        rows, _ = db.note_list(_key(device), 0, 0, n)
+        notes, seq = rows, db.note_last_id()
+    else:
+        with _note_lock:
+            notes = list(reversed(_notes.get(_key(device), [])[-n:]))
+            seq = _note_seq
     items = [{'t': 'meta', 'a': str(seq), 'b': hhmm()}]
     for x in notes:
         items.append({'t': 'msg', 'a': str(x['id']), 'b': x['title'], 'c': x['text'], 'd': x['level'],
@@ -666,13 +683,15 @@ def device_id(text: str) -> str:
     return t if len(t) == 12 else ''
 
 
-def handle_request(path_with_query: str, body: bytes = b'', public: bool = False, authorized=None):
+def handle_request(path_with_query: str, body: bytes = b'', public: bool = False, authorized=None,
+                   db=None, ip: str = ''):
     """(status, content type, body) for /notify, /wxpusher/send and /wxpusher/logout.
     The body is a form or JSON; query fields count too. A local server takes
     them from its network (one message list and one WxPusher login for its
-    boards); a public one only with a portal session: authorized(device id)
-    tells whether the request has the admin's or that device's own session
-    (device id '': the admin's). /notify then needs to=<device id>."""
+    boards); a public one only in a device's name: /notify needs mac= (or to=)
+    and either password= (the app service password the device is registered
+    with, proxy/device_auth.py) or the admin's or that device's portal session
+    (authorized(device id); device id '': the admin's). db keeps the messages."""
     url = urllib.parse.urlparse(path_with_query)
     fields = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
     text = body.decode('utf-8', 'replace') if body else ''
@@ -688,14 +707,21 @@ def handle_request(path_with_query: str, body: bytes = b'', public: bool = False
     try:
         if url.path == '/notify':
             if public:
-                to = device_id(fields.get('to', ''))
+                to = device_id(fields.get('mac') or fields.get('to') or fields.get('device') or '')
                 if not to:
-                    return _reply(400, {'success': False, 'error': 'to=<device id> is required on this server'})
-                if not allowed(to):
-                    return _reply(401, {'success': False, 'error': 'unauthorized: log in to the portal'})
-                out = notify_push(fields, to)
+                    return _reply(400, {'success': False, 'error': 'mac=<device id> is required on this server'})
+                if fields.get('password'):
+                    from .device_auth import verify_password
+                    ok, why = verify_password(db, to, fields['password'], ip)
+                    if not ok:
+                        return _reply(403, {'success': False, 'error': why})
+                elif not allowed(to):
+                    return _reply(401, {'success': False,
+                                        'error': "unauthorized: password=<the device's app service password>, "
+                                                 'or log in to the portal'})
+                out = notify_push(fields, to, db)
             else:
-                out = notify_push(fields, 'local')
+                out = notify_push(fields, 'local', db)
         elif url.path == '/wxpusher/logout':
             if public:                  # a board logs out through its app (/app/wxpusher?logout=1)
                 return _reply(404, {'success': False, 'error': 'unknown endpoint'})
@@ -724,7 +750,7 @@ def _reply(status, obj):
     return status, 'application/json; charset=utf-8', json.dumps(obj, ensure_ascii=False).encode('utf-8')
 
 
-def app_items(path: str, qs: Dict[str, str], device: str, public: bool) -> List[Dict[str, str]]:
+def app_items(path: str, qs: Dict[str, str], device: str, public: bool, db=None) -> List[Dict[str, str]]:
     """/app/wxpusher or /app/notifier for a request: a public server answers
     a device on the encrypted channel (its own login and messages); a local
     one has one of each for its boards."""
@@ -734,6 +760,17 @@ def app_items(path: str, qs: Dict[str, str], device: str, public: bool) -> List[
     try:
         if path == '/app/wxpusher':
             return app_wxpusher(qs, key)
-        return app_notifier(qs, key)
+        return app_notifier(qs, key, db)
     except ProxyError as e:
         return [{'t': 'error', 'a': clip(str(e), 60)}]
+
+
+def notes_page(db, mac: str, qs) -> dict:
+    """The user portal's page of notifier messages: newest first, off / lim (at most 200)."""
+    def num(k, d, lo, hi):
+        try:
+            return max(lo, min(int(qs.get(k, [str(d)])[0]), hi))
+        except ValueError:
+            return d
+    rows, total = db.note_list(mac, 0, num("off", 0, 0, 10 ** 7), num("lim", 50, 1, 200))
+    return {"success": True, "total": total, "items": rows}

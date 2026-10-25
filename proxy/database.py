@@ -128,6 +128,21 @@ class Database:
                     PRIMARY KEY (mac, day, slot, med)
                 )
             """)
+            # the notifier's messages (proxy/wxpusher.py): all of them, until the owner
+            # deletes them; mac is the device's id, or "local" for a local server's list
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mac TEXT NOT NULL,
+                    created INTEGER NOT NULL,
+                    time TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    source TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS notes_mac ON notes (mac, id)")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS admin_config (
                     key TEXT PRIMARY KEY,
@@ -237,13 +252,20 @@ class Database:
                 items.append(d)
             return items
 
-    def clear_app_data(self, mac: str, app_id: str):
+    def clear_app_data(self, mac: str, app_id: str, item: Optional[str] = None):
+        """An app's data of the device; item: one of its records only (a notifier message's id)."""
         clean_mac = normalize_device_id(mac)
         with self._get_conn() as conn:
+            if app_id == "notifier" and item:
+                conn.execute("DELETE FROM notes WHERE mac = ? AND id = ?", (clean_mac, int(item)))
+                conn.commit()
+                return
             conn.execute("DELETE FROM app_data WHERE mac = ? AND app_id = ?", (clean_mac, app_id))
             if app_id == "medicine":     # its records too (proxy/medicine.py)
                 conn.execute("DELETE FROM med_records WHERE mac = ?", (clean_mac,))
                 conn.execute("DELETE FROM med_names WHERE mac = ?", (clean_mac,))
+            if app_id == "notifier":     # its messages (proxy/wxpusher.py)
+                conn.execute("DELETE FROM notes WHERE mac = ?", (clean_mac,))
             conn.commit()
 
     def clear_all_app_data(self, mac: str):
@@ -252,6 +274,7 @@ class Database:
             conn.execute("DELETE FROM app_data WHERE mac = ?", (clean_mac,))
             conn.execute("DELETE FROM med_records WHERE mac = ?", (clean_mac,))
             conn.execute("DELETE FROM med_names WHERE mac = ?", (clean_mac,))
+            conn.execute("DELETE FROM notes WHERE mac = ?", (clean_mac,))
             conn.commit()
 
     def delete_device_account(self, mac: str):
@@ -262,7 +285,37 @@ class Database:
             conn.execute("DELETE FROM access_logs WHERE mac = ?", (clean_mac,))
             conn.execute("DELETE FROM med_records WHERE mac = ?", (clean_mac,))
             conn.execute("DELETE FROM med_names WHERE mac = ?", (clean_mac,))
+            conn.execute("DELETE FROM notes WHERE mac = ?", (clean_mac,))
             conn.commit()
+
+    # The notifier's messages (proxy/wxpusher.py) ------------------------------------------
+
+    @staticmethod
+    def _note_key(key: str) -> str:
+        return "local" if key == "local" else normalize_device_id(key)
+
+    def note_add(self, key: str, time_text: str, title: str, text: str, level: str, source: str) -> int:
+        with self._get_conn() as conn:
+            cur = conn.execute("INSERT INTO notes (mac, created, time, title, text, level, source) "
+                               "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               (self._note_key(key), int(time.time()), time_text, title, text, level, source))
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def note_list(self, key: str, since: int = 0, offset: int = 0, limit: int = 50) -> Tuple[List[Dict[str, Any]], int]:
+        """(messages with an id past since, newest first, the total of them)."""
+        k = self._note_key(key)
+        with self._get_conn() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM notes WHERE mac = ? AND id > ?", (k, since)).fetchone()[0]
+            cur = conn.execute("SELECT id, created, time, title, text, level, source FROM notes "
+                               "WHERE mac = ? AND id > ? ORDER BY id DESC LIMIT ? OFFSET ?", (k, since, limit, offset))
+            return [dict(r) for r in cur.fetchall()], total
+
+    def note_last_id(self) -> int:
+        """The newest id ever given (it never goes back, also when messages are deleted)."""
+        with self._get_conn() as conn:
+            row = conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'notes'").fetchone()
+            return int(row[0]) if row else 0
 
     # The medicine app's records (proxy/medicine.py) ------------------------------------
 

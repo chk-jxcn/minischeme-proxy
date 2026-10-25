@@ -76,7 +76,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         token = self._session_token(urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query))
         public = getattr(self.server_ctx, "public", False)
         return wxpusher.handle_request(self.path, body, public,
-                                       lambda mac: verify_admin_session(token) or (bool(mac) and check_user_session(token, mac)))
+                                       lambda mac: verify_admin_session(token) or (bool(mac) and check_user_session(token, mac)),
+                                       self.server_ctx.db, self.client_address[0])
 
     def _send_html(self, html: str, status: int = 200):
         body = html.encode("utf-8")
@@ -178,6 +179,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return self._send_json({"success": False, "error": "unauthorized"}, 401)
             items = self.server_ctx.db.get_device_logs(mac)
             return self._send_json({"success": True, "items": items})
+
+        if path == "/api/user/notes":   # the notifier's messages, newest first
+            mac = qs.get("mac", [""])[0]
+            token = self._session_token(qs)
+            if not check_user_session(token, mac):
+                return self._send_json({"success": False, "error": "unauthorized"}, 401)
+            return self._send_json(wxpusher.notes_page(self.server_ctx.db, mac, qs))
 
         if path == "/api/user/med_records":   # the medicine app's records, newest first
             mac = qs.get("mac", [""])[0]
@@ -520,8 +528,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 return self._send_json({"success": False, "error": "unauthorized"}, 401)
             if not app_id or app_id == "all":
                 self.server_ctx.db.clear_all_app_data(mac)
-            else:
-                self.server_ctx.db.clear_app_data(mac, app_id)
+            else:   # id: one record (a notifier message)
+                self.server_ctx.db.clear_app_data(mac, app_id, payload.get("id") or qs.get("id", [None])[0])
             return self._send_json({"success": True})
 
         if path == "/api/user/account/delete":

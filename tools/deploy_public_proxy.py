@@ -58,8 +58,10 @@ def generate_10_letter_password():
     return "".join(secrets.choice(string.ascii_letters) for _ in range(10))
 
 
-def create_payload_archive():
-    """Creates an in-memory tar.gz archive of server.py, proxy/ package, and apps/ market bundle."""
+def create_payload_archive(with_apps=False):
+    """Creates an in-memory tar.gz archive of server.py, the proxy/ package and firmware/;
+    with_apps: also apps/ (the server keeps its market up to date from GitHub by itself,
+    proxy/market_sync.py; this is for a server that cannot reach GitHub)."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         # Add server.py
@@ -77,9 +79,9 @@ def create_payload_archive():
                     rel_p = os.path.relpath(full_p, BASE_DIR).replace("\\", "/")
                     tar.add(full_p, arcname=rel_p)
 
-        # Add apps directory (index.json and compiled .msbc / .allinone.scm for /market/*)
+        # apps/ (index.json and compiled .msbc / .allinone.scm for /market/*) only when asked
         apps_dir = os.path.join(BASE_DIR, "apps")
-        if os.path.isdir(apps_dir):
+        if with_apps and os.path.isdir(apps_dir):
             for f in os.listdir(apps_dir):
                 full_p = os.path.join(apps_dir, f)
                 if os.path.isfile(full_p) and (f == "index.json" or f.endswith((".msbc", ".allinone.scm"))):
@@ -137,7 +139,7 @@ def deploy():
 
     # 4. Upload application archive and unpack
     print("[4/6] Packaging and uploading server and proxy modules...")
-    archive_bytes = create_payload_archive()
+    archive_bytes = create_payload_archive("--with-apps" in sys.argv[1:])
     print(f"      Archive size: {len(archive_bytes)} bytes")
     run_ssh(f"tar -xzf - -C {REMOTE_DIR}", input_bytes=archive_bytes)
     print("      Files extracted successfully into /opt/minischeme-proxy")

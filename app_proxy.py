@@ -92,6 +92,11 @@ def main():
 
     server = ProxyServer((args.host, args.port), master_key_1, admin_password, db_path=db_path, protocol_mode=proto_mode, admin_login_delay=login_delay,
                          public=args.mode == "public", config_path=os.path.abspath(args.config))
+    # /market/* from apps/ next to this file, kept up to date from GitHub (public: on by default)
+    from proxy import market_sync
+    sync_on, sync_repo, sync_minutes = market_sync.settings(cfg, args.mode == "public")
+    if sync_on:
+        market_sync.start(os.path.join(os.path.dirname(os.path.abspath(__file__)), "apps"), sync_repo, sync_minutes)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

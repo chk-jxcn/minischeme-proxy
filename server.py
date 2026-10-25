@@ -1583,6 +1583,17 @@ def main():
         server_config.admin_login_delay = max(0, args.admin_login_delay)
 
     os.chdir(BASE_DIR)
+    if "proxy" in server_config.components:
+        # /market/* from apps/, kept up to date from GitHub (on by default for a public server)
+        from proxy import market_sync
+        sync_cfg = configparser.ConfigParser()
+        try:
+            sync_cfg.read(server_config.config_file, encoding="utf-8")
+        except Exception:
+            pass
+        sync_on, sync_repo, sync_minutes = market_sync.settings(sync_cfg, server_config.is_public())
+        if sync_on:
+            market_sync.start(os.path.join(BASE_DIR, "apps"), sync_repo, sync_minutes)
     httpd, bound_port = create_server_with_fallback(args.host, args.port, WebReplHandler)
     ACTIVE_PORT = bound_port
     primary_ip = get_primary_ip()

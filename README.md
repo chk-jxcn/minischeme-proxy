@@ -53,6 +53,9 @@ python app_proxy.py --mode public --port 8087 --config config.ini
 ### The public server
 `tools/deploy_public_proxy.py` deploys `server.py` (the same code the WebREPL's local server runs) as the systemd service `minischeme-proxy` in `/opt/minischeme-proxy`: `server.py --proxy-only --protocol both` (plaintext `/app/*` for the online simulator, MSC1 for boards). An existing `/opt/minischeme-proxy/config.ini` is kept untouched; a new one gets a random admin password and `master_key_1`, and an empty `[qweather]` section.
 
+### The market follows GitHub
+`/market/<file>` serves the `apps/` folder next to the server. A public server keeps it up to date by itself (`proxy/market_sync.py`): at start and every 10 minutes it looks at the newest Release of chk-jxcn/minischeme-apps; when that changed it downloads the index and only the images (and sources) that differ, checks each one (an image's size and FNV-1a hash against the index), moves them in, then the index, and deletes the images the new index no longer names. A failed round leaves the folder as it was. The outcome is `/market/sync-status.json`. config.ini `[market]`: `github_sync = 1|0` (default: on for a public server, off locally, where `apps/` holds the PC's own builds), `github_repo`, `github_sync_minutes`; `MINISCHEME_MARKET_SYNC=0|1` overrides. `tools/deploy_public_proxy.py` no longer uploads `apps/` (`--with-apps` does, for a server that cannot reach GitHub).
+
 ## Font server (`font_server.py`)
 A service of its own, beside the app proxy: boards ask it, **without a password**, for the glyphs of the characters their fonts lack (emoji, Korean, traditional and rare characters), or for every character of their system text when `font_server_first = 1` (firmware API 1.11, config.ini `[fonts]`). It needs no app server.
 

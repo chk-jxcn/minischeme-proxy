@@ -21,7 +21,7 @@ config.ini [market]: github_sync = 1|0 (default: on for a public server, off for
 the local one, whose apps/ are the PC's own builds), github_repo
 (chk-jxcn/minischeme-apps), github_sync_minutes (10). MINISCHEME_MARKET_SYNC=0|1
 overrides github_sync. Without a token GitHub allows 60 API calls an hour; a
-round makes one (two with a new release).
+round makes one or two.
 """
 
 import json
@@ -63,22 +63,46 @@ def _version_key(tag: str) -> Tuple[int, ...]:
     return tuple(int(n) for n in nums) if nums else (-1,)
 
 
+def _release_info(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(r, dict) or r.get("draft") or r.get("prerelease"):
+        return None
+    assets = {a["name"]: {"url": a.get("browser_download_url", ""), "size": int(a.get("size") or 0)}
+              for a in r.get("assets") or [] if isinstance(a, dict) and a.get("name")}
+    return {"tag": str(r.get("tag_name") or ""), "assets": assets} if "index.json" in assets else None
+
+
 def newest_release(repo: str, fetch: Fetch) -> Optional[Dict[str, Any]]:
-    """The highest version tag among the repo's published releases that carries an index.json:
-    {"tag": ..., "assets": {name: {"url", "size"}}}, or None."""
-    rows = json.loads(fetch(f"https://api.github.com/repos/{repo}/releases?per_page=10", 20).decode("utf-8"))
+    """The repo's latest release when it carries an index.json, else the highest version tag
+    among its last few: {"tag": ..., "assets": {name: {"url", "size"}}}, or None. (Each
+    release in GitHub's answer is ~50 KB: the short answers suit a slow line.)"""
+    try:
+        best = _release_info(json.loads(fetch(f"https://api.github.com/repos/{repo}/releases/latest", 30)
+                                        .decode("utf-8")))
+        if best:
+            return best
+    except Exception:
+        pass
+    rows = json.loads(fetch(f"https://api.github.com/repos/{repo}/releases?per_page=3", 60).decode("utf-8"))
     best = None
     for r in rows if isinstance(rows, list) else []:
-        if r.get("draft") or r.get("prerelease"):
-            continue
-        assets = {a["name"]: {"url": a.get("browser_download_url", ""), "size": int(a.get("size") or 0)}
-                  for a in r.get("assets") or [] if a.get("name")}
-        if "index.json" not in assets:
-            continue
-        tag = str(r.get("tag_name") or "")
-        if best is None or _version_key(tag) > _version_key(best["tag"]):
-            best = {"tag": tag, "assets": assets}
+        info = _release_info(r)
+        if info and (best is None or _version_key(info["tag"]) > _version_key(best["tag"])):
+            best = info
     return best
+
+
+def _retrying(fetch: Fetch, tries: int = 3) -> Fetch:
+    """A slow line drops downloads now and then (IncompleteRead): each one is tried again."""
+    def get(url: str, timeout: float) -> bytes:
+        for k in range(tries):
+            try:
+                return fetch(url, timeout)
+            except Exception:
+                if k == tries - 1:
+                    raise
+                time.sleep(2 * (k + 1))
+        raise RuntimeError("unreachable")
+    return get
 
 
 def _index_apps(index: Any) -> List[Dict[str, Any]]:
@@ -115,6 +139,7 @@ def sync_once(apps_dir: str, repo: str = DEFAULT_REPO, fetch: Fetch = _http_get)
     os.makedirs(apps_dir, exist_ok=True)
     status: Dict[str, Any] = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "repo": repo}
     staging = os.path.join(apps_dir, STAGING_DIR)
+    fetch = _retrying(fetch)
     try:
         rel = newest_release(repo, fetch)
         if not rel:

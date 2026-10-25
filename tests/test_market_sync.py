@@ -8,6 +8,11 @@ import pytest
 from proxy import market_sync as ms
 
 
+@pytest.fixture(autouse=True)
+def _no_waiting(monkeypatch):
+    monkeypatch.setattr(ms.time, "sleep", lambda s: None)   # the retries' pauses
+
+
 def _index(apps):
     return json.dumps([{"id": i, "file": f"{i}.msbc", "size": len(img), "hash": f"{ms.fnv1a(img):08x}",
                         "scm": f"{i}.allinone.scm"} for i, (img, _) in apps.items()]).encode()
@@ -20,9 +25,17 @@ class FakeGitHub:
         self.releases = releases
         self.fetched = []
         self.broken = set()   # asset names served damaged
+        self.no_latest = False
 
     def __call__(self, url, timeout):
         self.fetched.append(url)
+        if url.endswith("/releases/latest"):
+            if self.no_latest:
+                raise OSError("404")
+            rows = json.loads(self(url.replace("/latest", "?per_page=3"), timeout))
+            self.fetched.pop()
+            return json.dumps(max((r for r in rows if not r.get("draft")),
+                                  key=lambda r: tuple(int(x) for x in r["tag_name"][1:].split(".")))).encode()
         if url.startswith("https://api.github.com/"):
             rows = []
             for tag, apps in self.releases.items():
@@ -64,7 +77,27 @@ def test_same_release_downloads_nothing(tmp_path):
     gh.fetched.clear()
     s = ms.sync_once(str(tmp_path), fetch=gh)
     assert s["result"] == "current"
-    assert len(gh.fetched) == 1            # the release list only
+    assert len(gh.fetched) == 1            # the latest release only
+
+
+def test_without_a_latest_release_the_highest_tag_wins(tmp_path):
+    gh = FakeGitHub({"v1.0.9": {"a": (b"A1", b"(a1)")}, "v1.0.10": {"a": (b"A2", b"(a2)")}})
+    gh.no_latest = True
+    s = ms.sync_once(str(tmp_path), fetch=gh)
+    assert s["tag"] == "v1.0.10" and (tmp_path / "a.msbc").read_bytes() == b"A2"
+
+
+def test_a_dropped_download_is_tried_again(tmp_path):
+    gh = FakeGitHub({"v1.0.1": {"a": (b"A", b"(a)")}})
+    drops = {"n": 2}
+
+    def flaky(url, timeout):
+        if url.endswith("a.msbc") and drops["n"]:
+            drops["n"] -= 1
+            raise OSError("IncompleteRead")
+        return gh(url, timeout)
+
+    assert ms.sync_once(str(tmp_path), fetch=flaky)["result"] == "updated"
 
 
 def test_new_release_fetches_only_changed_apps_and_deletes_removed_ones(tmp_path):

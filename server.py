@@ -474,6 +474,15 @@ def fetch_latest_release_asset(repo, asset_name, prefer_local=True):
     return 404, "application/json", b'{"error":"release asset not found"}'
 
 
+def market_dirs():
+    """The folders /market/<file> is served from, in order: a public server's apps/ (kept
+    up to date from GitHub, proxy/market_sync.py); for a local one its apps/ (the PC's own
+    builds: minischeme-apps build_apps.py --sync) and then market_cache/ (from GitHub)."""
+    if server_config.is_public():
+        return [os.path.join(BASE_DIR, "apps")]
+    return [os.path.join(BASE_DIR, "apps"), os.path.join(DATA_DIR, "market_cache")]
+
+
 def fetch_allows_private(client_ip):
     """Whether /fetch may reach this network for a client: only on a local
     server (the PC's WebREPL), for a client on this network."""
@@ -494,13 +503,14 @@ def handle_proxy_endpoint(path_with_query, client_ip="", device="", forward_devi
 
     if path.startswith("/market/"):
         rel = urllib.parse.unquote(path[len("/market/"):])
-        local_candidate = safe_join(os.path.join(BASE_DIR, "apps"), rel)
-        if local_candidate is None:
-            return 404, "application/json", b'{"error":"market file not found"}'
-        if os.path.isfile(local_candidate):
-            ctype = "application/json" if rel.endswith(".json") else "application/octet-stream"
-            with open(local_candidate, "rb") as f:
-                return 200, ctype, f.read()
+        for folder in market_dirs():
+            local_candidate = safe_join(folder, rel)
+            if local_candidate is None:
+                return 404, "application/json", b'{"error":"market file not found"}'
+            if os.path.isfile(local_candidate):
+                ctype = "application/json" if rel.endswith(".json") else "application/octet-stream"
+                with open(local_candidate, "rb") as f:
+                    return 200, ctype, f.read()
         if "/" not in rel:
             status, ctype, body = fetch_latest_release_asset("minischeme-apps", rel)
             if status == 200:
@@ -1584,16 +1594,17 @@ def main():
 
     os.chdir(BASE_DIR)
     if "proxy" in server_config.components:
-        # /market/* from apps/, kept up to date from GitHub (on by default for a public server)
+        # /market/* kept up to date from GitHub: a public server's apps/, a local one's
+        # market_cache/ beside its data (its apps/ holds the PC's own builds, which come first)
         from proxy import market_sync
         sync_cfg = configparser.ConfigParser()
         try:
             sync_cfg.read(server_config.config_file, encoding="utf-8")
         except Exception:
             pass
-        sync_on, sync_repo, sync_minutes = market_sync.settings(sync_cfg, server_config.is_public())
+        sync_on, sync_repo, sync_minutes = market_sync.settings(sync_cfg, True)
         if sync_on:
-            market_sync.start(os.path.join(BASE_DIR, "apps"), sync_repo, sync_minutes)
+            market_sync.start(market_dirs()[-1], sync_repo, sync_minutes)
     httpd, bound_port = create_server_with_fallback(args.host, args.port, WebReplHandler)
     ACTIVE_PORT = bound_port
     primary_ip = get_primary_ip()

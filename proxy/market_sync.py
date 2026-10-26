@@ -10,9 +10,16 @@ it changed:
      (an image whose size and FNV-1a hash match the index is kept, its source
      with it);
   2. checks each download: an image's size and hash against the index, a
-     source's size against the release asset;
+     source's size against the release asset (when the release's list was read);
   3. only when every file arrived and checked: moves them in, then index.json,
      then deletes the images and sources the new index no longer names.
+
+Where from: a release tag of minischeme-apps sits on the CI's build commit, whose
+dist/ holds the same files as the release. GitHub's own hosts are slow or cut off
+from some servers (mainland China), so the newest tag comes from the GitHub API,
+else jsDelivr's package list, and each file from jsDelivr's copy of dist/ at the
+tag, else raw.githubusercontent.com, else the release download; the checks above
+make any source safe.
 
 Any failure leaves the folder as it was (the next round tries again). The
 outcome is written to apps/sync-status.json (served as /market/sync-status.json).
@@ -72,37 +79,57 @@ def _release_info(r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def newest_release(repo: str, fetch: Fetch) -> Optional[Dict[str, Any]]:
-    """The repo's latest release when it carries an index.json, else the highest version tag
-    among its last few: {"tag": ..., "assets": {name: {"url", "size"}}}, or None. (Each
-    release in GitHub's answer is ~50 KB: the short answers suit a slow line.)"""
+    """{"tag": ..., "assets": {name: {"url", "size"}}, "via": ...} of the newest release, or None:
+    GitHub's latest release, else the highest of its last three (each release in GitHub's
+    answer is ~50 KB: short answers suit a slow line), else the highest version jsDelivr
+    lists for the repository (no asset list then)."""
     try:
         best = _release_info(json.loads(fetch(f"https://api.github.com/repos/{repo}/releases/latest", 30)
                                         .decode("utf-8")))
         if best:
-            return best
+            return dict(best, via="github")
     except Exception:
         pass
-    rows = json.loads(fetch(f"https://api.github.com/repos/{repo}/releases?per_page=3", 60).decode("utf-8"))
-    best = None
-    for r in rows if isinstance(rows, list) else []:
-        info = _release_info(r)
-        if info and (best is None or _version_key(info["tag"]) > _version_key(best["tag"])):
-            best = info
-    return best
+    try:
+        rows = json.loads(fetch(f"https://api.github.com/repos/{repo}/releases?per_page=3", 60).decode("utf-8"))
+        infos = [i for i in (_release_info(r) for r in (rows if isinstance(rows, list) else [])) if i]
+        if infos:
+            return dict(max(infos, key=lambda i: _version_key(i["tag"])), via="github")
+    except Exception:
+        pass
+    d = json.loads(fetch(f"https://data.jsdelivr.com/v1/packages/gh/{repo}", 30).decode("utf-8"))
+    versions = [str(v.get("version") or "") for v in (d.get("versions") or []) if isinstance(v, dict)]
+    versions = [v for v in versions if re.fullmatch(r"\d+(\.\d+)*", v)]
+    if not versions:
+        return None
+    return {"tag": "v" + max(versions, key=_version_key), "assets": {}, "via": "jsdelivr"}
 
 
-def _retrying(fetch: Fetch, tries: int = 3) -> Fetch:
-    """A slow line drops downloads now and then (IncompleteRead): each one is tried again."""
-    def get(url: str, timeout: float) -> bytes:
-        for k in range(tries):
+def _sources(repo: str, tag: str, name: str, assets: Dict[str, Any]) -> List[str]:
+    urls = [f"https://cdn.jsdelivr.net/gh/{repo}@{tag}/dist/{name}",
+            f"https://raw.githubusercontent.com/{repo}/{tag}/dist/{name}"]
+    if (assets.get(name) or {}).get("url"):
+        urls.append(assets[name]["url"])
+    return urls
+
+
+def _download(fetch: Fetch, urls: List[str], good: Callable[[bytes], bool], timeout: float) -> bytes:
+    """The first answer from urls (each tried twice: a slow line drops downloads now and
+    then) that passes good(); the last error otherwise."""
+    last: Exception = ValueError("no source")
+    for url in urls:
+        for k in range(2):
             try:
-                return fetch(url, timeout)
-            except Exception:
-                if k == tries - 1:
-                    raise
-                time.sleep(2 * (k + 1))
-        raise RuntimeError("unreachable")
-    return get
+                data = fetch(url, timeout)
+                if good(data):
+                    return data
+                last = ValueError(f"{url.rsplit('/', 1)[-1]}: size or hash does not match the index")
+                break                                   # a wrong file: the next source
+            except Exception as e:
+                last = e
+                if k == 0:
+                    time.sleep(2)
+    raise last
 
 
 def _index_apps(index: Any) -> List[Dict[str, Any]]:
@@ -134,22 +161,29 @@ def _write_status(apps_dir: str, status: Dict[str, Any]):
         pass
 
 
+def _parses(data: bytes) -> bool:
+    try:
+        _index_apps(json.loads(data.decode("utf-8")))
+        return True
+    except Exception:
+        return False
+
+
 def sync_once(apps_dir: str, repo: str = DEFAULT_REPO, fetch: Fetch = _http_get) -> Dict[str, Any]:
-    """One round: {"result": "current"|"updated"|"error", "tag", "downloaded", "deleted", "error"?}."""
+    """One round: {"result": "current"|"updated"|"error", "tag", "via", "downloaded", "deleted", "error"?}."""
     os.makedirs(apps_dir, exist_ok=True)
     status: Dict[str, Any] = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "repo": repo}
     staging = os.path.join(apps_dir, STAGING_DIR)
-    fetch = _retrying(fetch)
     try:
         rel = newest_release(repo, fetch)
         if not rel:
-            raise ValueError("no release with an index.json")
+            raise ValueError("no release found")
         tag, assets = rel["tag"], rel["assets"]
-        status["tag"] = tag
+        status.update(tag=tag, via=rel["via"])
         current = (_read(os.path.join(apps_dir, RELEASE_FILE)) or b"").decode("utf-8", "replace").strip()
-        index_raw = fetch(assets["index.json"]["url"], 30) if current != tag else _read(os.path.join(apps_dir, "index.json"))
-        if index_raw is None:          # recorded as current but the index is gone: fetch it again
-            index_raw = fetch(assets["index.json"]["url"], 30)
+        index_raw = _read(os.path.join(apps_dir, "index.json")) if current == tag else None
+        if index_raw is None:          # a new release, or the index is gone
+            index_raw = _download(fetch, _sources(repo, tag, "index.json", assets), _parses, 30)
         apps = _index_apps(json.loads(index_raw.decode("utf-8")))
 
         wanted: Dict[str, Dict[str, Any]] = {}       # file name -> what to check it against
@@ -179,12 +213,7 @@ def sync_once(apps_dir: str, repo: str = DEFAULT_REPO, fetch: Fetch = _http_get)
         shutil.rmtree(staging, ignore_errors=True)
         os.makedirs(staging)
         for name in todo:
-            asset = assets.get(name)
-            if not asset:
-                raise ValueError(f"{name}: not in release {tag}")
-            data = fetch(asset["url"], 120)
-            if not is_good(name, data):
-                raise ValueError(f"{name}: size or hash does not match the index")
+            data = _download(fetch, _sources(repo, tag, name, assets), lambda d, n=name: is_good(n, d), 120)
             with open(os.path.join(staging, name), "wb") as f:
                 f.write(data)
 

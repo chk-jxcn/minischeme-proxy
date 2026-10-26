@@ -32,6 +32,28 @@ th { background: #f1f5f9; color: #475569; }
 .badge-sim { background: #f3e8ff; color: #7e22ce; }
 .masked { font-family: monospace; background: #f1f5f9; padding: 2px 6px; border-radius: 4px; color: #0369a1; }
 .hidden { display: none; }
+
+.nc { border:1px solid #e2e8f0; border-radius:10px; padding:12px; margin-top:12px; background:#f8fafc; }
+.nc-row { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px; }
+.nc-row input { flex:1; min-width:180px; }
+.nc-tools { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; align-items:center; }
+.nc-tools button, .nc-tools select, .nc-tools label { padding:4px 10px; font-size:12px; }
+.nc-cols { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-start; }
+.nc-cols textarea { flex:1; min-width:260px; min-height:220px; font-family:inherit; font-size:14px; padding:8px; box-sizing:border-box; }
+.nc-screen { width:320px; min-height:220px; max-height:420px; overflow:auto; background:#0b1118; color:#e6ecf3; border-radius:8px; padding:8px 10px; box-sizing:border-box; font-size:15px; line-height:20px; }
+.nc-screen .nr-t { color:#62d0f0; margin-bottom:6px; }
+.nr-h { color:#62d0f0; border-bottom:2px solid #62d0f0; padding-bottom:2px; margin:2px 0 4px; }
+.nr-li { padding-left:14px; text-indent:-12px; }
+.nr-big2 { font-size:30px; line-height:40px; }
+.nr-big3 { font-size:45px; line-height:60px; }
+.nr-li::before { content:'• '; }
+.nr-hr { border:0; border-top:1px solid #688098; margin:6px 0; }
+.nr-img { display:block; margin:4px 0; border-radius:4px; }
+.nc-foot { display:flex; justify-content:space-between; align-items:center; margin-top:8px; gap:10px; flex-wrap:wrap; }
+#note-table .nr-cell { max-width:420px; }
+#note-table .nr-cell .nr-h { color:#0a6f9c; border-color:#0a6f9c; }
+#note-table .nr-cell .nr-big2 { font-size:20px; line-height:26px; }
+#note-table .nr-cell .nr-big3 { font-size:26px; line-height:32px; }
 </style>
 </head>
 <body>
@@ -96,7 +118,36 @@ th { background: #f1f5f9; color: #475569; }
       <h3 style="margin:0;">消息提示 <span id="note-total" class="badge"></span></h3>
       <button class="danger" style="padding:6px 14px; font-size:13px;" onclick="clearNotes()">清空服务器上的消息</button>
     </div>
-    <p style="margin:6px 0 0; color:#64748b; font-size:13px;">推送给这台设备的消息（/notify），服务器全部保留，从新到旧；设备上的“消息提示”应用只保留它设定的最新几条。推送：<code>/notify?mac=设备ID&amp;password=应用服务密码&amp;title=标题&amp;text=内容&amp;level=info|warn|urgent</code></p>
+    <p style="margin:6px 0 0; color:#64748b; font-size:13px;">推送给这台设备的消息（/notify），服务器全部保留，从新到旧；设备上的“消息提示”应用只保留它设定的最新几条。在下面写好发送，或者用脚本推送：<code>/notify?mac=设备ID&amp;password=应用服务密码&amp;title=标题&amp;text=内容&amp;level=info|warn|urgent</code>（内容可以用同样的标记）。</p>
+
+    <div class="nc" id="note-compose">
+      <div class="nc-row">
+        <input id="nc-title" maxlength="60" placeholder="标题（可空）">
+        <select id="nc-level"><option value="info">通知</option><option value="warn">提醒</option><option value="urgent">紧急（按键才关）</option></select>
+      </div>
+      <div class="nc-tools">
+        <button class="secondary" type="button" onclick="ncLine('# ')" title="这一行作为标题">标题</button>
+        <button class="secondary" type="button" onclick="ncLine('## ')" title="这一行两倍大">大字×2</button>
+        <button class="secondary" type="button" onclick="ncLine('### ')" title="这一行三倍大">大字×3</button>
+        <button class="secondary" type="button" onclick="ncWrap('**', '**')" title="强调（强调色）">强调</button>
+        <select id="nc-color" onchange="ncColor(this)" title="给选中的文字上色">
+          <option value="">颜色…</option><option value="red">红</option><option value="green">绿</option>
+          <option value="yellow">黄</option><option value="blue">蓝</option><option value="gray">灰</option>
+        </select>
+        <button class="secondary" type="button" onclick="ncLine('- ')" title="列表项">列表</button>
+        <button class="secondary" type="button" onclick="ncInsert('\\n---\\n')" title="分隔线">分隔线</button>
+        <button class="secondary" type="button" onclick="ncImageUrl()" title="网络图片（服务器取来，按屏幕缩放）">图片链接</button>
+        <label class="secondary" style="cursor:pointer; border:1px solid #cbd5e1; border-radius:6px;" title="上传一张图片">上传图片<input type="file" accept="image/*" style="display:none" onchange="ncUpload(this)"></label>
+      </div>
+      <div class="nc-cols">
+        <textarea id="nc-text" maxlength="1000" oninput="ncPreview()" placeholder="# 标题&#10;**强调** 和 {red}红字{/}&#10;- 列表项&#10;---&#10;![](https://图片地址)"></textarea>
+        <div><div style="font-size:12px; color:#64748b; margin-bottom:4px;">设备上的样子（预览）</div><div id="nc-preview" class="nc-screen"></div></div>
+      </div>
+      <div class="nc-foot">
+        <span id="nc-status" style="font-size:13px; color:#64748b;">标记：# 标题、## 两倍大字、### 三倍大字、**强调**、{red}颜色{/}（红 绿 黄 蓝 灰）、- 列表、--- 分隔线、![](图片地址)；空行分段</span>
+        <button type="button" onclick="ncSend()">发送到设备</button>
+      </div>
+    </div>
     <table id="note-table">
       <thead><tr><th>时间</th><th>级别</th><th>标题</th><th>内容</th><th>来源</th><th>操作</th></tr></thead>
       <tbody></tbody>
@@ -320,6 +371,153 @@ async function loadMedRecords(more) {
   document.getElementById('med-total').innerText = d.total ? `共 ${d.total} 条` : '';
   document.getElementById('med-more').classList.toggle('hidden', medOffset >= (d.total || 0));
 }
+
+/* Rich messages (proxy/notes_rich.py): the markup -> the board's encoding -> HTML */
+const NC_COLOR = {a: '#62d0f0', r: '#ee7c7c', g: '#72d696', y: '#f0bc55', b: '#5a96fa', m: '#a2b2c6', n: ''};
+const NC_NAMES = {red: 'r', '红': 'r', green: 'g', '绿': 'g', yellow: 'y', '黄': 'y', blue: 'b', '蓝': 'b', gray: 'm', grey: 'm', '灰': 'm'};
+const ncImages = {};   // uploaded pictures: id -> [width, height]
+function ncInline(s) {
+  const re = /\\*\\*|\\{\\/\\}|\\{([a-z]+|[红绿黄蓝灰])\\}/g;
+  let out = '', pos = 0, color = 'n', strong = false, m;
+  while ((m = re.exec(s))) {
+    out += s.slice(pos, m.index).split('^').join('^^');
+    if (m[0] === '**') strong = !strong;
+    else if (m[0] === '{/}') color = 'n';
+    else if (NC_NAMES[m[1]]) color = NC_NAMES[m[1]];
+    else { out += m[0].split('^').join('^^'); pos = re.lastIndex; continue; }
+    out += '^' + (strong ? 'a' : color);
+    pos = re.lastIndex;
+  }
+  return out + s.slice(pos).split('^').join('^^');
+}
+/* a picture inside a line goes on a line of its own there (as the server does) */
+function ncPictureLines(text) {
+  const out = [];
+  for (const line of text.split('\\n')) {
+    const re = /!\\[[^\\]]*\\]\\(\\s*[^)\\s]+\\s*\\)/g;
+    let pos = 0, m;
+    while ((m = re.exec(line))) {
+      if (line.slice(pos, m.index).trim()) out.push(line.slice(pos, m.index).replace(/\\s+$/, ''));
+      out.push(m[0]);
+      pos = re.lastIndex;
+    }
+    if (pos === 0) out.push(line);
+    else if (line.slice(pos).trim()) out.push(line.slice(pos).trim());
+  }
+  return out;
+}
+/* the preview's encoding: pictures by URL stay URLs (^u...;), uploaded ones are ^i */
+function ncEncode(text) {
+  return '^!' + ncPictureLines(text).map(raw => {
+    const s = raw.replace(/\\s+$/, ''), bare = s.trim();
+    const img = /^!\\[[^\\]]*\\]\\(\\s*([^)\\s]+)\\s*\\)$/.exec(bare);
+    if (['---', '***', '___'].includes(bare)) return '^=';
+    if (img) {
+      const src = img[1];
+      if (src.startsWith('id:')) { const wh = ncImages[src.slice(3)] || [320, 180]; return `^i${src.slice(3)}:${wh[0]}x${wh[1]};`; }
+      return /^https?:/.test(src) ? `^u${src};` : '^m' + ncInline('[图片无法载入]');
+    }
+    if (bare.startsWith('#')) {
+      const level = Math.min(3, bare.length - bare.replace(/^#+/, '').length);
+      return ['^#', '^2', '^3'][level - 1] + ncInline(bare.replace(/^#+/, '').trim());
+    }
+    if (/^(- |\\* |• )/.test(bare)) return '^-' + ncInline(bare.slice(2).trim());
+    return ncInline(s);
+  }).join('^/');
+}
+function ncSpans(s) {
+  let out = '', cur = '', color = 'n';
+  const flush = () => { if (cur) out += NC_COLOR[color] ? `<span style="color:${NC_COLOR[color]}">${esc(cur)}</span>` : esc(cur); cur = ''; };
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '^' && i + 1 < s.length) {
+      const c = s[++i];
+      if (c === '^') { cur += '^'; continue; }
+      flush(); color = c; continue;
+    }
+    cur += s[i];
+  }
+  flush();
+  return out;
+}
+function richHtml(enc, width) {
+  if (!String(enc || '').startsWith('^!')) return esc(enc);
+  return enc.slice(2).split('^/').map(line => {
+    if (line.startsWith('^=')) return '<hr class="nr-hr">';
+    let m = /^\\^i([0-9a-f]{16}):(\\d+)x(\\d+);/.exec(line);
+    if (m) {
+      const w = width, h = Math.max(16, Math.min(200, Math.round(width * Number(m[3]) / Number(m[2]))));
+      return `<img class="nr-img" src="/app/notifier/pic?id=${m[1]}&w=${w}&h=${h}" width="${w}" height="${h}" alt="图片">`;
+    }
+    m = /^\\^u(.+);$/.exec(line);
+    if (m) return `<img class="nr-img" src="${esc(m[1])}" style="max-width:${width}px; max-height:200px;" alt="图片">`;
+    if (line.startsWith('^#')) return `<div class="nr-h">${ncSpans(line.slice(2))}</div>`;
+    if (line.startsWith('^2') || line.startsWith('^3')) return `<div class="nr-big${line[1]}">${ncSpans(line.slice(2)) || '&nbsp;'}</div>`;
+    if (line.startsWith('^-')) return `<div class="nr-li">${ncSpans(line.slice(2))}</div>`;
+    return `<div>${ncSpans(line) || '&nbsp;'}</div>`;
+  }).join('');
+}
+function ncPreview() {
+  const title = document.getElementById('nc-title').value.trim();
+  const text = document.getElementById('nc-text').value;
+  document.getElementById('nc-preview').innerHTML = (title ? `<div class="nr-t">${esc(title)}</div>` : '') +
+    (text.trim() ? richHtml(ncEncode(text), 296) : '<div style="color:#64748b">（空）</div>');
+}
+function ncInsert(s) {
+  const t = document.getElementById('nc-text'), a = t.selectionStart, b = t.selectionEnd;
+  t.value = t.value.slice(0, a) + s + t.value.slice(b);
+  t.selectionStart = t.selectionEnd = a + s.length;
+  t.focus(); ncPreview();
+}
+function ncWrap(open, close) {
+  const t = document.getElementById('nc-text'), a = t.selectionStart, b = t.selectionEnd;
+  const sel = t.value.slice(a, b) || '文字';
+  t.value = t.value.slice(0, a) + open + sel + close + t.value.slice(b);
+  t.selectionStart = a + open.length; t.selectionEnd = a + open.length + sel.length;
+  t.focus(); ncPreview();
+}
+function ncLine(prefix) {
+  const t = document.getElementById('nc-text'), a = t.selectionStart;
+  const start = t.value.lastIndexOf('\\n', a - 1) + 1;
+  t.value = t.value.slice(0, start) + prefix + t.value.slice(start);
+  t.selectionStart = t.selectionEnd = a + prefix.length;
+  t.focus(); ncPreview();
+}
+function ncColor(sel) { if (sel.value) ncWrap(`{${sel.value}}`, '{/}'); sel.value = ''; }
+function ncImageUrl() {
+  const url = prompt('图片地址（http:// 或 https://，服务器取来后按屏幕缩放）');
+  if (url) ncInsert(`![](${url.trim()})`);
+}
+async function ncUpload(input) {
+  const f = input.files && input.files[0];
+  input.value = '';
+  if (!f) return;
+  const st = document.getElementById('nc-status');
+  st.textContent = '上传图片…';
+  try {
+    const r = await fetch(`/notify/image?mac=${encodeURIComponent(curMac)}`, { method: 'POST', headers: authHeaders(), body: f });
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || r.status);
+    ncImages[d.id] = [d.width, d.height];
+    ncInsert(`![](id:${d.id})`);
+    st.textContent = `已上传图片 ${d.width}×${d.height}`;
+  } catch (e) { st.textContent = '上传失败：' + (e.message || e); }
+}
+async function ncSend() {
+  const st = document.getElementById('nc-status');
+  const text = document.getElementById('nc-text').value.trim(), title = document.getElementById('nc-title').value.trim();
+  if (!text && !title) { st.textContent = '标题和内容都是空的'; return; }
+  st.textContent = '发送中…';
+  try {
+    const r = await fetch(`/notify?mac=${encodeURIComponent(curMac)}`, {
+      method: 'POST', headers: authHeaders({'Content-Type': 'application/json'}),
+      body: JSON.stringify({title, text, level: document.getElementById('nc-level').value, from: '用户门户'})});
+    const d = await r.json();
+    if (!d.success) throw new Error(d.error || r.status);
+    st.textContent = '已发送，设备几秒内收到';
+    document.getElementById('nc-text').value = ''; document.getElementById('nc-title').value = '';
+    ncPreview(); loadNotes(false);
+  } catch (e) { st.textContent = '发送失败：' + (e.message || e); }
+}
 let noteOffset = 0;
 const NOTE_LEVEL = {info: '通知', warn: '提醒', urgent: '紧急'};
 function noteTime(sec) {
@@ -337,7 +535,7 @@ async function loadNotes(more) {
   (d.items || []).forEach(x => {
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${noteTime(x.created)}</td><td style="color:${x.level === 'urgent' ? '#dc2626' : x.level === 'warn' ? '#d97706' : '#2563eb'}">${esc(NOTE_LEVEL[x.level] || x.level)}</td>` +
-                   `<td>${esc(x.title)}</td><td>${esc(x.text)}</td><td>${esc(x.source)}</td>` +
+                   `<td>${esc(x.title)}</td><td class="nr-cell">${richHtml(x.text, 160)}</td><td>${esc(x.source)}</td>` +
                    `<td><button class="secondary" style="padding:3px 10px;font-size:12px;" onclick="deleteNote(${Number(x.id)})">删除</button></td>`;
     tbody.appendChild(tr);
   });

@@ -309,7 +309,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         raw_body = self.rfile.read(length) if length > 0 else b""
 
         if path in wxpusher.HTTP_PATHS:
-            return self._send_raw(self._wx_request(raw_body[:65536]))
+            limit = wxpusher.IMAGE_BODY_MAX if path == "/notify/image" else 65536
+            return self._send_raw(self._wx_request(raw_body[:limit]))
 
         if path.startswith("/channel") and getattr(self.server_ctx, "protocol_mode", "both") == "unencrypted":
             return self._send_json({

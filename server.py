@@ -1042,8 +1042,9 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
         parsed_self = urllib.parse.urlparse(self.path)
         req_path = parsed_self.path
 
-        if req_path in ("/notify", "/wxpusher/send", "/wxpusher/logout") and "proxy" in server_config.components:
-            body = self.rfile.read(min(int(self.headers.get("Content-Length", 0) or 0), 65536))
+        if req_path in ("/notify", "/notify/image", "/wxpusher/send", "/wxpusher/logout") and "proxy" in server_config.components:
+            limit = 6 * 1024 * 1024 + 1024 if req_path == "/notify/image" else 65536   # a picture's bytes
+            body = self.rfile.read(min(int(self.headers.get("Content-Length", 0) or 0), limit))
             return self._wx_reply(handle_wx_request(self, body))
 
         if req_path == "/api/font/make":

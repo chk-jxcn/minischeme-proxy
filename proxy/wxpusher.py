@@ -582,10 +582,16 @@ _note_seq = 0
 _note_lock = threading.Lock()
 
 
-def notify_push(fields: Dict[str, str], device: str = '', db=None) -> Dict[str, Any]:
-    """A message for device ('local': a local server's boards), kept in db (else in memory)."""
+def notify_push(fields: Dict[str, str], device: str = '', db=None, allow_private: bool = False) -> Dict[str, Any]:
+    """A message for device ('local': a local server's boards), kept in db (else in memory).
+    Text with markup (proxy/notes_rich.py) is kept encoded for the board; its pictures are
+    fetched now (a public server: internet hosts only)."""
     global _note_seq
-    text = clip(fields.get('text') or fields.get('content') or '', 400)
+    from .notes_rich import encode, plain, resolve_picture
+    raw = str(fields.get('text') or fields.get('content') or '').replace('\r\n', '\n').strip()   # lines kept: markup
+    raw = re.sub(r'[ \t\f\v]+', ' ', raw)
+    raw = raw if len(raw) <= 1000 else raw[:999] + '…'
+    text = encode(raw, lambda src: resolve_picture(src, allow_private))
     title = clip(fields.get('title') or '', 60)
     if not text and not title:
         raise ProxyError('empty message: text= or title=')
@@ -605,7 +611,7 @@ def notify_push(fields: Dict[str, str], device: str = '', db=None) -> Dict[str, 
     result = {'success': True, 'id': note_id}
     if str(fields.get('wx', '')).lower() in ('1', 'true', 'yes'):
         try:
-            result['wx'] = wxpusher_send((title + '\n' if title else '') + text, title or text)
+            result['wx'] = wxpusher_send((title + '\n' if title else '') + plain(text), title or plain(text))
         except ProxyError as e:
             result['wx'] = {'ok': False, 'message': str(e)}
     return result
@@ -674,13 +680,36 @@ def wxpusher_send(content: str, summary: str = '', content_type: int = 1, uids=N
 # HTTP: GET/POST /notify, POST /wxpusher/send and /wxpusher/logout
 # ---------------------------------------------------------------------------
 
-HTTP_PATHS = ('/notify', '/wxpusher/send', '/wxpusher/logout')
+HTTP_PATHS = ('/notify', '/notify/image', '/wxpusher/send', '/wxpusher/logout')
+IMAGE_BODY_MAX = 6 * 1024 * 1024 + 1024   # /notify/image: a picture's bytes
 
 
 def device_id(text: str) -> str:
     """A device id as the channel names it (12 uppercase hex digits), '' if not one."""
     t = re.sub(r'[^0-9A-Fa-f]', '', text or '').upper()
     return t if len(t) == 12 else ''
+
+
+def _notify_image(fields: Dict[str, str], body: bytes, public: bool, allowed, db, ip: str):
+    """POST /notify/image (body: a picture's bytes): kept for messages, answers its id for
+    the markup ![](id:<id>). The same rights as /notify."""
+    from .notes_rich import store_image
+    if public:
+        to = device_id(fields.get('mac') or fields.get('to') or fields.get('device') or '')
+        if not to:
+            return _reply(400, {'success': False, 'error': 'mac=<device id> is required on this server'})
+        if fields.get('password'):
+            from .device_auth import verify_password
+            ok, why = verify_password(db, to, fields['password'], ip)
+            if not ok:
+                return _reply(403, {'success': False, 'error': why})
+        elif not allowed(to):
+            return _reply(401, {'success': False, 'error': 'unauthorized'})
+    try:
+        pid, w, h = store_image(body)
+    except Exception as e:   # noqa: BLE001 - not a picture
+        return _reply(400, {'success': False, 'error': f'not a picture: {e}'})
+    return _reply(200, {'success': True, 'id': pid, 'width': w, 'height': h})
 
 
 def handle_request(path_with_query: str, body: bytes = b'', public: bool = False, authorized=None,
@@ -704,6 +733,8 @@ def handle_request(path_with_query: str, body: bytes = b'', public: bool = False
     elif text:
         fields.update({k: v[0] for k, v in urllib.parse.parse_qs(text, keep_blank_values=True).items()})
     allowed = authorized or (lambda mac: False)
+    if url.path == '/notify/image':
+        return _notify_image(fields, body, public, allowed, db, ip)
     try:
         if url.path == '/notify':
             if public:
@@ -721,7 +752,7 @@ def handle_request(path_with_query: str, body: bytes = b'', public: bool = False
                                                  'or log in to the portal'})
                 out = notify_push(fields, to, db)
             else:
-                out = notify_push(fields, 'local', db)
+                out = notify_push(fields, 'local', db, allow_private=True)
         elif url.path == '/wxpusher/logout':
             if public:                  # a board logs out through its app (/app/wxpusher?logout=1)
                 return _reply(404, {'success': False, 'error': 'unknown endpoint'})

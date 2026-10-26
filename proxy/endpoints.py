@@ -1608,6 +1608,10 @@ def handle_app_query(path_with_query: str, client_ip: str = "", device: str = ""
     elif path == "/app/tide":
         from .tide import get_tide
         data = get_tide(locate_place(qs.get("loc", ["auto"])[0], effective_ip))
+    elif path == "/app/notifier/pic":   # a message's picture, as the board asks for it
+        from .notes_rich import picture as note_picture
+        return note_picture(qs.get("id", [""])[0], int(qs.get("w", ["300"])[0] or 300),
+                            int(qs.get("h", ["200"])[0] or 200))
     elif path in ("/app/wxpusher", "/app/notifier"):
         from .wxpusher import app_items
         data = {"items": app_items(path, {k: v[0] for k, v in qs.items()}, device, public, db)}

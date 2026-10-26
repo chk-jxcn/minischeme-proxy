@@ -98,7 +98,42 @@ def get_local_ips():
 
     if not ips:
         ips.append("127.0.0.1")
+    # The route to the internet may go through a VPN or a virtual switch, which an ESP32
+    # on the LAN cannot reach: the addresses of physical adapters come first
+    physical = _windows_physical_ips() if os.name == "nt" else []
+    if physical:
+        ips = [ip for ip in ips if ip in physical] + [ip for ip in physical if ip not in ips] + \
+              [ip for ip in ips if ip not in physical]
     return ips
+
+
+_VIRTUAL_ADAPTER_WORDS = ("vethernet", "wsl", "vmware", "virtualbox", "hyper-v", "tap", "vpn", "zerotier",
+                          "tailscale", "radmin", "hamachi", "loopback", "wireguard", "clash", "cfw", "npcap",
+                          "virtual", "docker")
+
+
+def _windows_physical_ips():
+    """IPv4 addresses of the wired and wireless adapters `ipconfig` lists (Ethernet or
+    Wireless LAN adapters whose names name no VPN or virtual switch); [] when unknown."""
+    try:
+        import locale
+        out = subprocess.run(["ipconfig"], capture_output=True, timeout=5,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        text = out.decode(locale.getpreferredencoding(False) or "mbcs", errors="replace")
+    except Exception:
+        return []
+    found, physical = [], False
+    for line in text.splitlines():
+        if line and not line[0].isspace() and line.rstrip().endswith(":"):
+            head = line.lower()
+            kind_ok = any(k in head for k in ("ethernet adapter", "wireless lan adapter")) or \
+                any(k in line for k in ("以太网适配器", "无线局域网适配器"))
+            physical = kind_ok and not any(w in head for w in _VIRTUAL_ADAPTER_WORDS)
+        elif physical and "IPv4" in line and ":" in line:
+            ip = line.rsplit(":", 1)[1].strip().split("(")[0].strip()
+            if ip and not ip.startswith("127.") and ip not in found:
+                found.append(ip)
+    return found
 
 
 def get_primary_ip():

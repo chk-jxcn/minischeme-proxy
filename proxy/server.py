@@ -278,6 +278,12 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                     ctype = "application/json" if rel.endswith(".json") else "application/octet-stream"
                     with open(cand, "rb") as f:
                         return 200, ctype, f.read()
+            if rel.endswith(".info.json") and "/" not in rel:   # one app's entry of index.json
+                from proxy.market_sync import app_info
+                info = app_info([os.path.join(base_dir, "apps"), os.path.join(base_dir, "dist")],
+                                rel[:-len(".info.json")])
+                if info:
+                    return 200, "application/json", info
             return 404, "application/json", b'{"error":"market file not found"}'
         if path == "/fetch":
             qs = urllib.parse.parse_qs(parsed.query)

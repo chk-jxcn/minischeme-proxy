@@ -121,3 +121,33 @@ def test_static_paths_and_log_redaction():
     for p in ("/", "/index.html", "/js/app.js", "/wasm/minischeme_vm.wasm", "/apps/index.json"):
         assert not static_path_blocked(p), p
     assert "secret123" not in redact_url("/app/weather?loc=x&token=secret123&key=abc")
+
+
+def test_market_app_info(tmp_path, monkeypatch):
+    """/market/<id>.info.json: one app's entry (a device never reads the whole index);
+    the file when the market has one, else cut from index.json; 404 for an unknown app."""
+    import server
+    from proxy.market_sync import app_info
+    entry = {"id": "weather", "name": "天气", "version": "9", "api": "1.15", "file": "weather.msbc",
+             "size": 10, "hash": "0badf00d"}
+    (tmp_path / "index.json").write_text(json.dumps([{"id": "news", "file": "news.msbc"}, entry]), encoding="utf-8")
+    assert json.loads(app_info([str(tmp_path / "none"), str(tmp_path)], "weather").decode("utf-8")) == entry
+    assert app_info([str(tmp_path)], "nosuch") is None
+    monkeypatch.setattr(server, "market_dirs", lambda: [str(tmp_path)])
+    status, ctype, body = server.handle_proxy_endpoint("/market/weather.info.json")
+    assert status == 200 and ctype == "application/json" and json.loads(body.decode("utf-8")) == entry
+    assert server.handle_proxy_endpoint("/market/nosuch.info.json")[0] == 404
+    (tmp_path / "news.info.json").write_text('{"id": "news", "version": "2"}', encoding="utf-8")
+    assert json.loads(server.handle_proxy_endpoint("/market/news.info.json")[2].decode("utf-8"))["version"] == "2"
+
+
+def test_market_app_info_converter(public_server):
+    """The converter (app_proxy.py) cuts it from its apps/ index.json as well (CORS: the device page reads it)."""
+    import server
+    first = json.loads(open(os.path.join(os.path.dirname(server.__file__), "apps", "index.json"), encoding="utf-8").read())
+    first = (first.get("apps") if isinstance(first, dict) else first)[0]
+    page = "http://192.168.2.184"          # the device page, on the LAN
+    status, headers, body = _get(public_server + f"/market/{first['id']}.info.json", {"Origin": page})
+    assert status == 200 and json.loads(body.decode("utf-8"))["id"] == first["id"]
+    assert headers.get("Access-Control-Allow-Origin") == page
+    assert _get(public_server + "/market/nosuch.info.json")[0] == 404

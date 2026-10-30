@@ -139,6 +139,22 @@ def _index_apps(index: Any) -> List[Dict[str, Any]]:
     return [a for a in apps if isinstance(a, dict)]
 
 
+def app_info(folders: List[str], app_id: str) -> Optional[bytes]:
+    """/market/<id>.info.json when no such file exists: the app's entry of the first
+    folder's index.json that lists it (JSON bytes), else None. A device reads only its
+    own apps' entries, never the whole index."""
+    for folder in folders:
+        raw = _read(os.path.join(folder, "index.json"))
+        try:
+            apps = _index_apps(json.loads(raw.decode("utf-8"))) if raw else []
+        except ValueError:
+            continue
+        for entry in apps:
+            if entry.get("id") == app_id:
+                return json.dumps(entry, ensure_ascii=False).encode("utf-8")
+    return None
+
+
 def _safe_name(name: str) -> bool:
     return bool(name) and "/" not in name and "\\" not in name and not name.startswith(".") and name.endswith(MANAGED)
 

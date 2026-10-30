@@ -546,6 +546,10 @@ def handle_proxy_endpoint(path_with_query, client_ip="", device="", forward_devi
                 ctype = "application/json" if rel.endswith(".json") else "application/octet-stream"
                 with open(local_candidate, "rb") as f:
                     return 200, ctype, f.read()
+        if rel.endswith(".info.json") and "/" not in rel:
+            from proxy.market_sync import app_info
+            info = app_info(market_dirs(), rel[:-len(".info.json")])
+            return (200, "application/json", info) if info else (404, "application/json", b'{"error":"no such app"}')
         if "/" not in rel:
             status, ctype, body = fetch_latest_release_asset("minischeme-apps", rel)
             if status == 200:

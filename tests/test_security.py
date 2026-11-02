@@ -141,13 +141,15 @@ def test_market_app_info(tmp_path, monkeypatch):
     assert json.loads(server.handle_proxy_endpoint("/market/news.info.json")[2].decode("utf-8"))["version"] == "2"
 
 
-def test_market_app_info_converter(public_server):
-    """The converter (app_proxy.py) cuts it from its apps/ index.json as well (CORS: the device page reads it)."""
-    import server
-    first = json.loads(open(os.path.join(os.path.dirname(server.__file__), "apps", "index.json"), encoding="utf-8").read())
-    first = (first.get("apps") if isinstance(first, dict) else first)[0]
+def test_market_app_info_converter(public_server, tmp_path, monkeypatch):
+    """The converter (app_proxy.py) cuts it from its index.json as well (CORS: the device page reads it)."""
+    from proxy import market_sync
+    (tmp_path / "index.json").write_text(json.dumps([{"id": "tide", "version": "9", "file": "tide.msbc"}]),
+                                         encoding="utf-8")
+    real = market_sync.app_info
+    monkeypatch.setattr(market_sync, "app_info", lambda folders, app_id: real([str(tmp_path)], app_id))
     page = "http://192.168.2.184"          # the device page, on the LAN
-    status, headers, body = _get(public_server + f"/market/{first['id']}.info.json", {"Origin": page})
-    assert status == 200 and json.loads(body.decode("utf-8"))["id"] == first["id"]
+    status, headers, body = _get(public_server + "/market/tide.info.json", {"Origin": page})
+    assert status == 200 and json.loads(body.decode("utf-8"))["version"] == "9"
     assert headers.get("Access-Control-Allow-Origin") == page
     assert _get(public_server + "/market/nosuch.info.json")[0] == 404

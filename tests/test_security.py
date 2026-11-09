@@ -144,12 +144,12 @@ def test_market_app_info(tmp_path, monkeypatch):
 def test_market_app_info_converter(public_server, tmp_path, monkeypatch):
     """The converter (app_proxy.py) cuts it from its index.json as well (CORS: the device page reads it)."""
     from proxy import market_sync
-    (tmp_path / "index.json").write_text(json.dumps([{"id": "tide", "version": "9", "file": "tide.msbc"}]),
+    (tmp_path / "index.json").write_text(json.dumps([{"id": "zz_test_app", "version": "9", "file": "zz_test_app.msbc"}]),
                                          encoding="utf-8")
     real = market_sync.app_info
     monkeypatch.setattr(market_sync, "app_info", lambda folders, app_id: real([str(tmp_path)], app_id))
     page = "http://192.168.2.184"          # the device page, on the LAN
-    status, headers, body = _get(public_server + "/market/tide.info.json", {"Origin": page})
+    status, headers, body = _get(public_server + "/market/zz_test_app.info.json", {"Origin": page})
     assert status == 200 and json.loads(body.decode("utf-8"))["version"] == "9"
     assert headers.get("Access-Control-Allow-Origin") == page
     assert _get(public_server + "/market/nosuch.info.json")[0] == 404

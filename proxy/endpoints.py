@@ -223,8 +223,8 @@ def locate_place(loc: str = "auto", client_ip: str = "") -> Dict[str, Any]:
         except Exception:
             pass
 
-    if not resolved:
-        resolved = {"name": "北京", "lat": 39.9042, "lon": 116.4074}
+    if not resolved:   # every lookup failed: Beijing for now, not cached (asked again next time)
+        return {"name": "北京", "lat": 39.9042, "lon": 116.4074}
 
     cache.set(cache_key, resolved, ttl_seconds=6 * 3600)
     return resolved
@@ -271,8 +271,14 @@ def series(values: List[float], scale: int = 1) -> str:
     return ",".join(str(int(round((v or 0) * scale))) for v in values)
 
 
-def fetch_qweather(loc: str, token: str, host: str, client_ip: str = "") -> Optional[List[Dict[str, Any]]]:
-    """Fetches live weather from QWeather using per-device token without persistence."""
+# the parts every weather answer needs: one failed, the answer is not cached
+QWEATHER_REQUIRED = ("now", "7d", "24h", "indices")
+
+
+def fetch_qweather(loc: str, token: str, host: str, client_ip: str = "",
+                   failed: Optional[List[str]] = None) -> Optional[List[Dict[str, Any]]]:
+    """Fetches live weather from QWeather using per-device token without persistence.
+    failed (a list) receives the required parts (QWEATHER_REQUIRED) that could not be read."""
     tok = token.strip()
     if not tok:
         return None
@@ -351,6 +357,8 @@ def fetch_qweather(loc: str, token: str, host: str, client_ip: str = "") -> Opti
                     results[k] = f.result()
                 except Exception:
                     results[k] = None
+        if failed is not None:
+            failed.extend(k for k in QWEATHER_REQUIRED if not results.get(k))
 
         now_res = results.get("now")
         if not now_res or "now" not in now_res:
@@ -535,11 +543,13 @@ def get_weather(loc: str = "auto", key: str = "", host: str = "", token: str = "
 
     if not tok:
         return {"items": [{"t": "error", "a": "天气: 服务器没有设置和风天气的 API key（应用设置里也可以填自己的）"}]}
-    items = fetch_qweather(loc, tok, hst, client_ip=client_ip)
+    failed: List[str] = []
+    items = fetch_qweather(loc, tok, hst, client_ip=client_ip, failed=failed)
     if not items:   # not cached: asked again next time; the device keeps its last weather
         return {"items": [{"t": "error", "a": "天气: 和风天气暂时无法访问"}]}
     data = {"title": "天气", "items": items}
-    cache.set(cache_key, data, ttl_seconds=600)
+    if not failed:  # a part missing (the forecast, the hours ...): shown now, asked again next time
+        cache.set(cache_key, data, ttl_seconds=600)
     return data
 
 

@@ -16,6 +16,8 @@ Document: {"items": [meta, now, curve, upd, ext...]}
 import json
 import threading
 import time
+
+from . import devtime
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -142,12 +144,12 @@ def value_at(series, when):
 
 
 def build_items(lat: float, lon: float, note: str, now: datetime = None, series=None, model_point=None) -> List[Dict[str, str]]:
-    now = now or datetime.now(TZ)
+    now = now or devtime.now()
     if series is None:
         series, model_point = fetch_series(lat, lon)
     fine = resample(series, 15)
     ex = extrema(fine)
-    day0 = datetime(now.year, now.month, now.day, tzinfo=TZ)
+    day0 = datetime(now.year, now.month, now.day, tzinfo=now.tzinfo)
     day1 = day0 + timedelta(days=1)
     today = [(t, v) for t, v in fine if day0 <= t <= day1]
     if len(today) < 90:
@@ -169,6 +171,7 @@ def build_items(lat: float, lon: float, note: str, now: datetime = None, series=
         {"t": "upd", "a": now.strftime("%H:%M")},
     ]
     for t, v, kind in two_days:
+        t = t.astimezone(now.tzinfo)
         items.append({"t": "ext", "a": t.strftime("%H:%M"), "b": str(int(round(v * 100))), "c": kind,
                       "d": str((t.date() - day0.date()).days)})
     return items
@@ -177,7 +180,7 @@ def build_items(lat: float, lon: float, note: str, now: datetime = None, series=
 def get_tide(place: Dict[str, Any]) -> Dict[str, Any]:
     """The document for a place from locate_place ({name, lat, lon}); cached 10 min."""
     lat, lon = float(place["lat"]), float(place["lon"])
-    key = (round(lat, 2), round(lon, 2))
+    key = (round(lat, 2), round(lon, 2), devtime.cache_tag())   # the times are the asking zone's
     now = time.time()
     with _lock:
         hit = _cache.get(key)

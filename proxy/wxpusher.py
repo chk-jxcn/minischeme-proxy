@@ -22,6 +22,8 @@ import socket
 import ssl
 import threading
 import time
+
+from . import devtime
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
@@ -70,7 +72,7 @@ def clip(text: Any, n: Optional[int] = None) -> str:
 
 
 def hhmm() -> str:
-    return dt.datetime.now().strftime('%H:%M')
+    return devtime.strftime('%H:%M')
 
 
 def wx_text(content: str) -> str:
@@ -524,7 +526,7 @@ class WxReceiver:
             items.append({'t': 'qr', 'a': '0', 'b': ','.join(qr_hex(r) for r in rows)})
         for m in msgs:
             item = {'t': 'h' if m['read'] else 'm', 'a': str(m['id']), 'b': m['title'],
-                    'c': dt.datetime.fromtimestamp(m['time']).strftime('%m-%d %H:%M')}
+                    'c': devtime.strftime('%m-%d %H:%M', m['time'])}
             text = (utf8_parts(m['content'], WX_TEXT_BYTES, 1) or [''])[0]
             if text:
                 item['d'] = text
@@ -605,8 +607,8 @@ def notify_push(fields: Dict[str, str], device: str = '', db=None, allow_private
             _note_seq += 1
             note_id = _note_seq
             notes = _notes.setdefault(_key(device), [])
-            notes.append({'id': note_id, 'time': hhmm(), 'title': title, 'text': text, 'level': level,
-                          'source': source})
+            notes.append({'id': note_id, 'time': hhmm(), 'created': int(time.time()), 'title': title, 'text': text,
+                          'level': level, 'source': source})
             del notes[:-NOTIFY_KEEP]
     result = {'success': True, 'id': note_id}
     if str(fields.get('wx', '')).lower() in ('1', 'true', 'yes'):
@@ -615,6 +617,12 @@ def notify_push(fields: Dict[str, str], device: str = '', db=None, allow_private
         except ProxyError as e:
             result['wx'] = {'ok': False, 'message': str(e)}
     return result
+
+
+def _note_time(note: Dict[str, Any]) -> str:
+    """When a message came, on the asking device's clock (the stored text is the server's)."""
+    created = note.get('created')
+    return devtime.strftime('%H:%M', created) if created else str(note.get('time') or '')
 
 
 def app_notifier(qs: Dict[str, str], device: str, db=None) -> List[Dict[str, str]]:
@@ -635,7 +643,7 @@ def app_notifier(qs: Dict[str, str], device: str, db=None) -> List[Dict[str, str
     items = [{'t': 'meta', 'a': str(seq), 'b': hhmm()}]
     for x in notes:
         items.append({'t': 'msg', 'a': str(x['id']), 'b': x['title'], 'c': x['text'], 'd': x['level'],
-                      'e': f'{x["time"]} {x["source"]}'.strip()})
+                      'e': f'{_note_time(x)} {x["source"]}'.strip()})
     return items
 
 

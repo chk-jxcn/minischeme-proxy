@@ -25,6 +25,7 @@ import urllib.parse
 import urllib.request
 from typing import Dict, Any, List, Optional
 from .cache import TTLCache
+from . import devtime
 
 cache = TTLCache()
 
@@ -259,7 +260,7 @@ def format_day_label(date_str: str, i: int) -> str:
         dt_val = datetime.date(int(parts[0]), m, d)
         wk = WEEKDAYS[dt_val.weekday()]
     except Exception:
-        now = datetime.date.today() + datetime.timedelta(days=i)
+        now = devtime.today() + datetime.timedelta(days=i)
         m, d = now.month, now.day
         wk = WEEKDAYS[now.weekday()]
     name = ["今天", "明天", "后天"][i] if i < 3 else "周" + wk
@@ -366,7 +367,7 @@ def fetch_qweather(loc: str, token: str, host: str, client_ip: str = "",
         now_data = now_res["now"]
 
         items: List[Dict[str, Any]] = [
-            {"t": "loc", "a": city_name, "b": "和风天气", "c": time.strftime("%H:%M")}
+            {"t": "loc", "a": city_name, "b": "和风天气", "c": devtime.strftime("%H:%M")}
         ]
 
         # 1. Now conditions
@@ -488,7 +489,7 @@ def fetch_qweather(loc: str, token: str, host: str, client_ip: str = "",
                 desc = str(idx.get("text", ""))
                 items.append({"t": "idx", "a": name, "b": cat, "c": desc})
 
-        items.append({"t": "upd", "a": time.strftime("%H:%M")})
+        items.append({"t": "upd", "a": devtime.strftime("%H:%M")})
         return items
     except Exception:
         return None
@@ -593,7 +594,7 @@ def _fmt_vol(v: float) -> str:
 
 def market_open() -> bool:
     """Returns True if Chinese stock market is currently in trading hours."""
-    now = datetime.datetime.now()
+    now = devtime.china_now()
     if now.weekday() >= 5:
         return False
     t = now.hour * 60 + now.minute
@@ -602,7 +603,7 @@ def market_open() -> bool:
 
 def futures_open() -> bool:
     """Returns True if Chinese futures market is in day or night session."""
-    now = datetime.datetime.now()
+    now = devtime.china_now()
     t = now.hour * 60 + now.minute
     if t >= 21 * 60:
         return now.weekday() < 5
@@ -785,7 +786,7 @@ def get_stocks(view: str = "home", codes: str = "sh600519,sz300750,sz000858", in
         idx_code = INDICES_LIVE[0] if INDICES_LIVE else idx_code
     is_open = market_open()
     items: List[Dict[str, str]] = [
-        {"t": "meta", "a": "交易中" if is_open else "已收盘", "b": "沪深市场", "c": time.strftime("%H:%M", time.localtime())}
+        {"t": "meta", "a": "交易中" if is_open else "已收盘", "b": "沪深市场", "c": devtime.strftime("%H:%M")}
     ]
 
     idx_items = [make_stock_item("idx", c, get_info(c)) for c in INDICES_LIVE]
@@ -815,7 +816,7 @@ def get_stocks(view: str = "home", codes: str = "sh600519,sz300750,sz000858", in
             items.append(kline(c))
 
     items = [it for it in items if it]   # a chart that could not be fetched is left out
-    items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
+    items.append({"t": "upd", "a": devtime.strftime("%H:%M:%S")})
     data = {"title": "股票行情", "items": items}
     cache.set(cache_key, data, ttl_seconds=15 if is_open else 120)
     return data
@@ -1073,7 +1074,7 @@ def get_crypto(view: str = "home", symbols: str = "BTC,ETH,SOL", chart: str = ""
             with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
                 klines = list(ex.map(lambda s: make_crypto_kline_item(s, rate), sym_list[:6]))
             items += [k for k in klines if k]
-        items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
+        items.append({"t": "upd", "a": devtime.strftime("%H:%M:%S")})
         data = {"title": "加密货币", "items": items}
     except CryptoUnavailable:
         if cache_key in _crypto_last_good:
@@ -1268,7 +1269,7 @@ def get_futures(view: str = "home", codes: str = "RB0,AU0,CU0", chart: str = "")
 
     is_open = futures_open()
     items: List[Dict[str, str]] = [
-        {"t": "meta", "a": "交易中" if is_open else "休市", "b": time.strftime("%H:%M", time.localtime())}
+        {"t": "meta", "a": "交易中" if is_open else "休市", "b": devtime.strftime("%H:%M")}
     ]
 
     q_items = [make_futures_quote_item(c, get_info(c)) for c in code_list]
@@ -1291,7 +1292,7 @@ def get_futures(view: str = "home", codes: str = "RB0,AU0,CU0", chart: str = "")
             items.append(make_futures_kline_item(c, get_info(c)))
 
     items = [it for it in items if it]   # a chart that could not be fetched is left out
-    items.append({"t": "upd", "a": time.strftime("%H:%M:%S", time.localtime())})
+    items.append({"t": "upd", "a": devtime.strftime("%H:%M:%S")})
     data = {"title": "期货行情", "items": items}
     cache.set(cache_key, data, ttl_seconds=15 if is_open else 120)
     return data
@@ -1409,7 +1410,7 @@ def _rise_set(pos_fn, day_start: datetime.datetime, lat: float, lon: float, hori
         if prev >= 0 > cur and sett is None:
             sett = t - datetime.timedelta(minutes=5 * cur / ((cur - prev) or 1))
         prev = cur
-    fmt = (lambda x: x.astimezone().strftime("%H:%M") if x else "--")
+    fmt = (lambda x: devtime.local(x).strftime("%H:%M") if x else "--")
     return fmt(rise), fmt(sett)
 
 
@@ -1468,8 +1469,8 @@ def _moon_rise_set(pos_fn, day_start: datetime.datetime, lat: float, lon: float,
     def fmt_event(dt):
         if not dt:
             return "--"
-        local_dt = dt.astimezone()
-        local_day_start = day_start.astimezone()
+        local_dt = devtime.local(dt)
+        local_day_start = devtime.local(day_start)
         diff = (local_dt.date() - local_day_start.date()).days
         hhmm = local_dt.strftime("%H:%M")
         if diff > 0:
@@ -1495,13 +1496,13 @@ def _next_moon(now: datetime.datetime, target: float):
 def cal_sky(place: Dict[str, Any]) -> List[Dict[str, str]]:
     now = datetime.datetime.now(datetime.timezone.utc)
     lat, lon = place["lat"], place["lon"]
-    local = now.astimezone()
+    local = devtime.local(now)
     day_start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(datetime.timezone.utc)
     elong = moon_elongation(now)
     illum = (1 - math.cos(math.radians(elong))) / 2
     phase = MOON_PHASES[int(((elong + 22.5) % 360) // 45)]
     nf, nn = _next_moon(now, 180.0), _next_moon(now, 0.0)
-    fmt = (lambda t: t.astimezone().strftime("%m-%d %H:%M") if t else "--")
+    fmt = (lambda t: devtime.local(t).strftime("%m-%d %H:%M") if t else "--")
     s_alt, s_az = sun_pos(now, lat, lon)
     m_alt, m_az = moon_pos(now, lat, lon)
     s_rise, s_set = _rise_set(sun_pos, day_start, lat, lon, -0.833)
@@ -1512,7 +1513,7 @@ def cal_sky(place: Dict[str, Any]) -> List[Dict[str, str]]:
         {"t": "sun", "a": str(round(s_az)), "b": f"{s_alt:.1f}", "c": s_rise, "d": s_set},
         {"t": "moonpos", "a": str(round(m_az)), "b": f"{m_alt:.1f}", "c": m_rise, "d": m_set},
         {"t": "loc", "a": place["name"], "b": f"{lat:.2f}", "c": f"{lon:.2f}"},
-        {"t": "upd", "a": time.strftime("%H:%M", time.localtime())}
+        {"t": "upd", "a": devtime.strftime("%H:%M")}
     ]
 
 
@@ -1547,7 +1548,7 @@ def get_usage() -> Dict[str, Any]:
             {"t": "mod", "a": "MiniScheme-Pro", "b": "840K", "c": "$3.10", "d": "65"},
             {"t": "mod", "a": "MiniScheme-Flash", "b": "444K", "c": "$1.72", "d": "35"},
             {"t": "trend", "a": "12,18,24,20,32,28,36,42,38,45,50,48"},
-            {"t": "upd", "a": time.strftime("%H:%M", time.localtime())}
+            {"t": "upd", "a": devtime.strftime("%H:%M")}
         ]
     }
 
@@ -1566,6 +1567,15 @@ def handle_app_query(path_with_query: str, client_ip: str = "", device: str = ""
     path = parsed.path
     qs = urllib.parse.parse_qs(parsed.query)
     effective_ip = (qs.get("client_ip", [""])[0] or qs.get("ip", [""])[0] or client_ip or "").strip()
+    tzo = devtime.parse_offset(qs.get("tzo", [""])[0])
+    if tzo is not None:   # the device's clock, said in the request itself (else the header's, else the server's)
+        token = devtime.set_offset(tzo)
+        try:
+            without = urllib.parse.urlencode([(k, v) for k, vs in qs.items() if k != "tzo" for v in vs])
+            return handle_app_query(path + ("?" + without if without else ""), client_ip=client_ip, device=device,
+                                    public=public, plain_device=plain_device, db=db)
+        finally:
+            devtime.reset(token)
 
     if path == "/app/weather":
         data = get_weather(

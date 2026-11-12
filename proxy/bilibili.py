@@ -43,6 +43,8 @@ import os
 import re
 import threading
 import time
+
+from . import devtime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -447,7 +449,7 @@ def get_bilibili(category: str = "popular", rid: str = "0", n: int = FETCH_N_DEF
     if subject:
         doc_items.append({"t": "meta", "a": board_text(subject)[:40]})
     doc_items.extend(items)
-    doc_items.append({"t": "upd", "a": time.strftime("%H:%M", time.localtime())})
+    doc_items.append({"t": "upd", "a": devtime.strftime("%H:%M")})
     data = {"items": doc_items}
     cache.set(cache_key, data, ttl_seconds=DOC_CACHE_S)
     return data

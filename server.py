@@ -524,7 +524,18 @@ def fetch_allows_private(client_ip):
     return not server_config.is_public() and is_private_host(client_ip or "")
 
 
-def handle_proxy_endpoint(path_with_query, client_ip="", device="", forward_device=""):
+def handle_proxy_endpoint(path_with_query, client_ip="", device="", forward_device="", utc_offset=None):
+    """utc_offset: the device's X-MiniScheme-UTC-Offset header (minutes east of UTC, proxy/devtime.py):
+    the dates and times of the answer are on its clock; None: the server's."""
+    from proxy import devtime
+    token = devtime.set_offset(devtime.parse_offset(utc_offset))
+    try:
+        return _handle_proxy_endpoint(path_with_query, client_ip, device, forward_device)
+    finally:
+        devtime.reset(token)
+
+
+def _handle_proxy_endpoint(path_with_query, client_ip="", device="", forward_device=""):
     """Dispatch /app/*, /health, /relay and /market/* requests in-process
     (device: the id of an encrypted channel request; forward_device: the id
     /relay passes on to the app server, the plain request's own header)."""
@@ -807,7 +818,8 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             if problem:
                 return self._json_reply({"success": False, "error": problem}, status=403)
             status, ctype, body = handle_proxy_endpoint(self.path, client_ip=self._get_client_ip(),
-                                                        device=device, forward_device=plain_device)
+                                                        device=device, forward_device=plain_device,
+                                                        utc_offset=self.headers.get("X-MiniScheme-UTC-Offset"))
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -862,7 +874,8 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             ):
                 p_query = parsed.path + ("?" + parsed.query if parsed.query else "")
                 status, ctype, body = handle_proxy_endpoint(p_query, client_ip=self._get_client_ip(),
-                                                            forward_device=sim_device)
+                                                            forward_device=sim_device,
+                                                            utc_offset=self.headers.get("X-MiniScheme-UTC-Offset"))
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
@@ -882,6 +895,8 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
             headers = {"User-Agent": "MiniScheme-Proxy/1.0"}
             if sim_device:
                 headers["X-MiniScheme-Device"] = sim_device
+            if self.headers.get("X-MiniScheme-UTC-Offset"):   # the simulator's clock, for another app proxy
+                headers["X-MiniScheme-UTC-Offset"] = self.headers.get("X-MiniScheme-UTC-Offset")
             try:
                 _, body = guarded_fetch(url, allow_private=fetch_allows_private(self._get_client_ip()), timeout=4,
                                         headers=headers)
@@ -1329,7 +1344,7 @@ class WebReplHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE, HEAD")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, X-MiniScheme-Device, Authorization, X-Requested-With, Range, Cache-Control, Pragma")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-MiniScheme-Auth, X-MiniScheme-Device, X-MiniScheme-UTC-Offset, Authorization, X-Requested-With, Range, Cache-Control, Pragma")
         self.send_header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Content-Range, X-MiniScheme-Auth")
         self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Access-Control-Max-Age", "86400")

@@ -12,6 +12,8 @@ just the error item and the device keeps what it shows.
 import json
 import threading
 import time
+
+from . import devtime
 import urllib.request
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -100,7 +102,7 @@ def _items(title: str, rows: List[Tuple[str, str]], n: int, when: float) -> List
     items = []
     for rank, (text, tag) in enumerate(rows[:n], 1):
         items.append({"t": "item", "a": text, "c": str(rank), "d": tag})
-    items.append({"t": "upd", "a": time.strftime("%H:%M", time.localtime(when))})
+    items.append({"t": "upd", "a": devtime.strftime("%H:%M", when)})
     return items
 
 

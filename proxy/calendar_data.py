@@ -9,6 +9,8 @@ without pip has it; an installed copy comes first.
 """
 
 import datetime as dt
+
+from . import devtime
 import os
 import re
 import sys
@@ -44,7 +46,7 @@ def clip(text: Any, n: Optional[int] = None) -> str:
 
 
 def _upd() -> Dict[str, str]:
-    return {"t": "upd", "a": dt.datetime.now().strftime("%H:%M")}
+    return {"t": "upd", "a": devtime.strftime("%H:%M")}
 
 
 def countdowns(text: str, today: dt.date) -> List[Tuple[str, int, dt.date]]:
@@ -163,7 +165,7 @@ def world_clocks(text: str, now: Optional[dt.datetime] = None) -> List[Tuple[str
 
 def cal_today(cd: str, wc: str = "", today: Optional[dt.date] = None) -> List[Dict[str, str]]:
     _need_lunar()
-    today = today or dt.date.today()
+    today = today or devtime.today()
     s = Solar.fromYmd(today.year, today.month, today.day)
     lu = s.getLunar()
     items = [{"t": "cdate", "a": f"{today.year}年{today.month}月{today.day}日", "b": "星期" + WEEK_CN[s.getWeek()],
@@ -217,7 +219,7 @@ def _day_label(lu, s) -> Tuple[str, str]:
 
 def cal_month(ym: str = "", today: Optional[dt.date] = None) -> List[Dict[str, str]]:
     _need_lunar()
-    today = today or dt.date.today()
+    today = today or devtime.today()
     year, month = today.year, today.month
     m = re.match(r"^(\d{4})-(\d{1,2})$", ym or "")
     if m:

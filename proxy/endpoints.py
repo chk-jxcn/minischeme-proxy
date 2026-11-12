@@ -1615,6 +1615,12 @@ def handle_app_query(path_with_query: str, client_ip: str = "", device: str = ""
             client_ip=effective_ip,
             ym=qs.get("ym", [""])[0]
         )
+    elif path == "/app/geo":      # the device's place and time zone, from its address
+        from .geo import get_geo
+        data = get_geo(effective_ip)
+        if not data:
+            return 502, "application/json; charset=utf-8", _json.dumps(
+                {"error": "geo: no location for this address"}, ensure_ascii=False).encode("utf-8")
     elif path == "/app/tide":
         from .tide import get_tide
         data = get_tide(locate_place(qs.get("loc", ["auto"])[0], effective_ip))
